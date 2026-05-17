@@ -3,7 +3,11 @@
 #include "constants.h"
 #include "messenger.h"
 #include "panel_spi_custom.h"
+#include "display.h"
 #include <Streaming.h>
+
+// S2.2: Display lives in main.cpp; we read frames_skipped_ for the heartbeat.
+extern Display display;
 
 
 Messenger::Messenger(queue_t &display_queue) : display_queue_(display_queue) {
@@ -24,8 +28,8 @@ Messenger::Messenger(queue_t &display_queue) : display_queue_(display_queue) {
             [this](Message &msg){this -> on_cmd_display_gray_16(msg);}
     });
 
-    // S1.9: V3 Persistent commands (same payload shape as V1 Oneshot; mode is
-    // set on the Pattern via Message::to_pattern() based on cmd id).
+    // V1 Persistent commands (same payload shape as V1 Oneshot; mode is set
+    // on the Pattern via Message::to_pattern() based on cmd id).
     cmd_umap_.insert( {
             CMD_ID_DISPLAY_GRAY_2_PERSIST,
             [this](Message &msg){this -> on_cmd_display_gray_2(msg);}
@@ -89,12 +93,12 @@ void Messenger::update() {
     //                                arm {header, 0xFF, 0x00}  (sentinel)
     //  - Any other invalidity:       do NOT touch the buffer (per spec)
     //
-    // S1.9: the confirmation's version byte echoes whichever protocol version
-    // the incoming message used (V1 = 0x01 or V3 = 0x03 for the Persistent
-    // subset we support). Spec says "panel returns the version, command, and
+    // The confirmation's version byte echoes the incoming message's protocol
+    // version (V1 firmware accepts only 0x01; v2+ versions will be added when
+    // those features land). Spec: "panel returns the version, command, and
     // checksum from the previously received command."
     if (parity_ok && length_ok && protocol_ok && cmd_ok) {
-        uint8_t in_version = msg.header_byte() & 0b01111111;  // 0x01 or 0x03
+        uint8_t in_version = msg.header_byte() & 0b01111111;  // 0x01 (V1 only)
         if (cmd_id == CMD_ID_COMMS_CHECK && !comm_check_ok_) {
             uint8_t hdr = Message::header_with_parity_for_3byte(
                 in_version, 0xFF, 0x00);
@@ -119,6 +123,7 @@ void Messenger::update() {
         Serial << "cmd_ok:         " << cmd_ok      << endl;
         Serial << "comm_check_ok:  " << comm_check_ok_ << endl;
         Serial << "queue_drops:    " << queue_drops_   << endl;
+        Serial << "frames_skipped: " << display.frames_skipped() << endl;
         Serial << endl;
     }
     // -----------------------------------------------------------

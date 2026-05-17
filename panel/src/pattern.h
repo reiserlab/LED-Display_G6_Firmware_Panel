@@ -28,7 +28,7 @@ class Pattern {
         PixelMatrix matrix_ = PixelMatrix::Zero();
         GrayLevel gray_level_ = GrayLevel::Gray_2;
         uint8_t stretch_ = 0;
-        DisplayMode mode_ = DisplayMode::Oneshot;  // V1 default; messenger overrides for V3 Persistent
+        DisplayMode mode_ = DisplayMode::Oneshot;  // default; messenger overrides for Persistent (cmd 0x11 / 0x31)
 };
 
 #endif

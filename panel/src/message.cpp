@@ -70,13 +70,11 @@ bool Message::check_protocol(uint8_t protocol) {
     // S1.2: mask the parity bit before comparing — otherwise a valid V1
     // message with parity=1 (header 0x81) would fail the version check.
     //
-    // S1.9: this firmware accepts both V1 (full) and V3 (Persistent subset)
-    // headers. The legacy single-protocol `protocol` argument is kept for
-    // back-compat but we ignore it when v3 commands need accepting; the
-    // dispatch table in messenger.cpp gates which cmd ids are valid.
+    // Persistent commands (0x11 / 0x31) live in V1 namespace, so V1 is the
+    // only accepted version. V2 (header 0x02/0x82) reserved for future
+    // Triggered/Gated/PSRAM commands; firmware will accept it then.
     uint8_t v = header_byte() & 0b01111111;
-    (void)protocol;  // suppress unused-arg warning; firmware accepts {V1, V3}
-    return (v == CMD_PROTOCOL_V1) || (v == CMD_PROTOCOL_V3);
+    return v == (protocol & 0b01111111);
 }
 
 
@@ -306,7 +304,7 @@ void Message::from_pattern_gray_16(Pattern &pat, uint8_t protocol) {
 
 
 void Message::to_pattern_gray_2(Pattern &pat) {
-    // Accept both V1 Oneshot (0x10) and V3 Persistent (0x13) — both share the
+    // Accept V1 Oneshot (0x10) and V1 Persistent (0x11) — both share the
     // 50 B + stretch payload shape. Mode is set by the caller (to_pattern()).
     uint8_t cmd = command_byte();
     if (cmd != CMD_ID_DISPLAY_GRAY_2 && cmd != CMD_ID_DISPLAY_GRAY_2_PERSIST) {
@@ -329,7 +327,7 @@ void Message::to_pattern_gray_2(Pattern &pat) {
 
 
 void Message::to_pattern_gray_16(Pattern &pat) {
-    // Accept both V1 Oneshot (0x30) and V3 Persistent (0x33) — same 200 B +
+    // Accept V1 Oneshot (0x30) and V1 Persistent (0x31) — same 200 B +
     // stretch payload shape; mode is set by to_pattern().
     uint8_t cmd = command_byte();
     if (cmd != CMD_ID_DISPLAY_GRAY_16 && cmd != CMD_ID_DISPLAY_GRAY_16_PERSIST) {
