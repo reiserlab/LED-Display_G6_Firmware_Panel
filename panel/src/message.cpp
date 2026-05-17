@@ -67,7 +67,33 @@ bool Message::check_length() {
 
 
 bool Message::check_protocol(uint8_t protocol) {
-    return header_byte() == protocol;
+    // S1.2: mask the parity bit before comparing — otherwise a valid V1
+    // message with parity=1 (header 0x81) would fail the version check.
+    //
+    // S1.9: this firmware accepts both V1 (full) and V3 (Persistent subset)
+    // headers. The legacy single-protocol `protocol` argument is kept for
+    // back-compat but we ignore it when v3 commands need accepting; the
+    // dispatch table in messenger.cpp gates which cmd ids are valid.
+    uint8_t v = header_byte() & 0b01111111;
+    (void)protocol;  // suppress unused-arg warning; firmware accepts {V1, V3}
+    return (v == CMD_PROTOCOL_V1) || (v == CMD_PROTOCOL_V3);
+}
+
+
+// S1.3 helper: build a parity-correct header byte for a 3-byte CIPO
+// confirmation message {header, cmd, checksum}. Parity rule per spec:
+// MSB of byte 0 = (count of 1-bits across bits[0..6] of byte 0, all bits of
+// cmd, all bits of checksum) mod 2.
+uint8_t Message::header_with_parity_for_3byte(
+    uint8_t version_byte_no_parity, uint8_t cmd, uint8_t checksum)
+{
+    uint8_t v = version_byte_no_parity & 0b01111111;
+    uint32_t count = 0;
+    count += std::bitset<sizeof(uint8_t)>(v).count();
+    count += std::bitset<sizeof(uint8_t)>(cmd).count();
+    count += std::bitset<sizeof(uint8_t)>(checksum).count();
+    uint8_t parity = count & 1;
+    return v | (parity << 7);
 }
 
 
@@ -96,18 +122,33 @@ void Message::to_pattern(Pattern &pat, bool &err) {
     uint8_t cmd = command_byte();
 
     // Check if message is something we can create a display pattern
-    // from.  If not exit with error. 
+    // from.  If not exit with error.
     if (DISPLAY_COMMANDS_UMAP.find(cmd) == DISPLAY_COMMANDS_UMAP.end()) {
         err = true;
     }
     else {
+        // Gray_2 vs Gray_16 + Oneshot vs Persistent are both encoded in the
+        // command byte. Payload shape only depends on gray level (Persistent
+        // commands have the same wire shape as the V1 Oneshot commands).
         switch (cmd) {
             case CMD_ID_DISPLAY_GRAY_2:
                 to_pattern_gray_2(pat);
+                pat.set_mode(DisplayMode::Oneshot);
                 break;
 
             case CMD_ID_DISPLAY_GRAY_16:
                 to_pattern_gray_16(pat);
+                pat.set_mode(DisplayMode::Oneshot);
+                break;
+
+            case CMD_ID_DISPLAY_GRAY_2_PERSIST:
+                to_pattern_gray_2(pat);   // same payload shape as 0x10
+                pat.set_mode(DisplayMode::Persistent);
+                break;
+
+            case CMD_ID_DISPLAY_GRAY_16_PERSIST:
+                to_pattern_gray_16(pat);  // same payload shape as 0x30
+                pat.set_mode(DisplayMode::Persistent);
                 break;
 
             default:
@@ -265,7 +306,10 @@ void Message::from_pattern_gray_16(Pattern &pat, uint8_t protocol) {
 
 
 void Message::to_pattern_gray_2(Pattern &pat) {
-    if (command_byte() != CMD_ID_DISPLAY_GRAY_2) {
+    // Accept both V1 Oneshot (0x10) and V3 Persistent (0x13) — both share the
+    // 50 B + stretch payload shape. Mode is set by the caller (to_pattern()).
+    uint8_t cmd = command_byte();
+    if (cmd != CMD_ID_DISPLAY_GRAY_2 && cmd != CMD_ID_DISPLAY_GRAY_2_PERSIST) {
         return;
     }
     pat.set_gray_level(GrayLevel::Gray_2);
@@ -285,7 +329,10 @@ void Message::to_pattern_gray_2(Pattern &pat) {
 
 
 void Message::to_pattern_gray_16(Pattern &pat) {
-    if (command_byte() != CMD_ID_DISPLAY_GRAY_16) {
+    // Accept both V1 Oneshot (0x30) and V3 Persistent (0x33) — same 200 B +
+    // stretch payload shape; mode is set by to_pattern().
+    uint8_t cmd = command_byte();
+    if (cmd != CMD_ID_DISPLAY_GRAY_16 && cmd != CMD_ID_DISPLAY_GRAY_16_PERSIST) {
         return;
     }
     pat.set_gray_level(GrayLevel::Gray_16);

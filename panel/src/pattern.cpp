@@ -25,6 +25,16 @@ void Pattern::set_stretch(uint8_t stretch) {
 }
 
 
+DisplayMode Pattern::mode() {
+    return mode_;
+}
+
+
+void Pattern::set_mode(DisplayMode mode) {
+    mode_ = mode;
+}
+
+
 PixelMatrix &Pattern::matrix() {
     return matrix_;
 }

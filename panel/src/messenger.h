@@ -22,8 +22,10 @@ class Messenger {
         Pattern pat_;
         queue_t &display_queue_;
         uint64_t msg_count_ = 0;
+        uint64_t queue_drops_ = 0;       // S1.6: count display-pattern queue overflows
+        bool     comm_check_ok_ = true;  // S1.4: COMM_CHECK byte-validation result; reset each update()
 
-        CommandUMap cmd_umap_; 
+        CommandUMap cmd_umap_;
         void on_cmd_comms_check(Message &msg);
         void on_cmd_display_gray_2(Message &msg);
         void on_cmd_display_gray_16(Message &msg);

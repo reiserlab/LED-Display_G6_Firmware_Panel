@@ -40,6 +40,13 @@ class Message {
         uint8_t calculate_parity_bit();
         uint8_t calculate_8bit_checksum();
 
+        // S1.3 helper: compute parity bit for a 3-byte CIPO confirmation
+        // {version_byte_no_parity, cmd, checksum}. version_byte_no_parity is the
+        // bottom 7 bits (protocol version); parity bit is the MSB to be set.
+        // Returns the full header byte with the parity bit set per spec rule.
+        static uint8_t header_with_parity_for_3byte(
+            uint8_t version_byte_no_parity, uint8_t cmd, uint8_t checksum);
+
         uint8_t *data_ptr();
 
         void print_data();
