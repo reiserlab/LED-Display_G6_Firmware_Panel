@@ -6,50 +6,100 @@
 // V1 wire-protocol frames to a second panel running the `panel/` slave firmware
 // and reads back the 3-byte CIPO confirmation, printing both to USB serial.
 //
-// Wiring (see panel_master/README.md for the pre-flight checklist):
-//   - Bottom J2 header on master  ↔  bottom J2 header on slave
-//   - Pins: MISO, MOSI, SCK, GND (NOT +5V — use independent USB power on each)
-//   - CS (J3 pin 5) on master  →  CS (J3 pin 5) on slave
+// IMPORTANT WIRING NOTE — bitbang master (not hardware SPI):
+//   The panel's PCB hardwires GP32 to the J2 pin labeled "MOSI" (master
+//   perspective) and GP35 to the J2 "MISO" pin. The RP2350 hardware SPI
+//   peripheral fixes pin roles: GP32 = spi0 RX (input), GP35 = spi0 TX
+//   (output). That's correct for slave operation, but in MASTER mode the
+//   peripheral would want GP32 as input-from-MISO and GP35 as output-to-MOSI
+//   — opposite of how the PCB is wired. Using hw-SPI on the master would
+//   require a crossover cable.
 //
-// SPI peripheral + pins per panel rev:
-//   v0.2.1: SPI0 on GP32(MOSI), GP33(CS), GP34(SCK), GP35(MISO)
-//   v0.3.1: SPI1 on GP40(MOSI), GP41(CS), GP42(SCK), GP43(MISO)
+//   To avoid the crossover-cable requirement, this firmware bitbangs SPI
+//   in software on plain GPIOs. Pin roles can then be assigned freely:
+//     MOSI_OUT = GP32  (drives the J2 "MOSI" wire to slave's GP32 RX)
+//     MISO_IN  = GP35  (reads the J2 "MISO" wire from slave's GP35 TX)
+//     SCK_OUT  = GP34  (drives the J2 "SCK" wire to slave's GP34 SCK)
+//     CS_OUT   = GP33  (drives the J3 pin 5 CS wire to slave's GP33 CSn)
+//   A straight-through J2↔J2 cable + J3pin5↔J3pin5 jumper works.
+//
+//   Slave still uses its hardware SPI peripheral; spec-compliant SPI mode 3.
 //
 // Test sequence (1 Hz cadence):
 //   1. COMM_CHECK with canonical payload 0..199
-//   2. Gray_2 row+column cross pattern, stretch=192
-//   3. Gray_16 gradient pattern, stretch=128
-//   4. Stretch sweep 0→255 on a Gray_16 frame (~20 steps over 20s)
+//   2. Gray_2 cross pattern (PERSISTENT 0x13), stretch=192
+//   3. Gray_16 gradient pattern (PERSISTENT 0x33), stretch=128
+//   4. Stretch sweep on Gray_16 PERSISTENT
+//   4b. V1 ONESHOT burst (500 frames at ~500 Hz)
 //   5. COMM_CHECK with one byte deliberately flipped (validation should fail)
-//   6. Truncated frame (header + cmd, no payload — length check should fail)
-//   7. Parity-corrupted frame (flipped payload byte, parity NOT recomputed)
+//   6. Truncated frame (length check should fail)
+//   7. Parity-corrupted frame
 // =============================================================================
 
 #include <Arduino.h>
 #include <Streaming.h>
-#include <hardware/spi.h>
 #include <hardware/gpio.h>
 #include "constants.h"
 #include "message.h"
 #include "pattern.h"
 #include "protocol.h"
 
-// Start at 1 MHz — well below the marginal hardware ceiling (target 25 MHz, max
-// 30 MHz). Bump after the harness passes once at 1 MHz.
-static constexpr uint32_t MASTER_SPI_HZ = 1'000'000;
+// Start at ~250 kHz — easy on the bitbang loop, well within slave hw-SPI spec.
+// Per-bit delay = roughly 2 µs total per bit (1 µs per half-period). The slave's
+// hw-SPI peripheral handles this comfortably; spec target is 25 MHz so we have
+// 100x margin for bench-test.
+static constexpr uint32_t BITBANG_HALF_PERIOD_US = 2;  // -> ~250 kHz bit rate
 
-static void cs_high() { gpio_put(SPI_CS_PIN, 1); }
-static void cs_low()  { gpio_put(SPI_CS_PIN, 0); }
+// Pin assignments (master perspective). With bitbang we are NOT bound by
+// hardware-SPI funcsel pin roles, so we can map outputs to the GPIOs whose
+// PCB traces go to the "MOSI" wire and "SCK" wire, and configure GP35 as an
+// input to read the slave's MISO drive. See constants.cpp for the per-rev
+// values of these macros (v0.2.1: 32/35/34/33; v0.3.1: 40/43/42/41).
+#define MASTER_MOSI_OUT_PIN  SPI_MOSI_PIN  // GP32 on v0.2.1
+#define MASTER_MISO_IN_PIN   SPI_MISO_PIN  // GP35 on v0.2.1
+#define MASTER_SCK_OUT_PIN   SPI_SCK_PIN   // GP34 on v0.2.1
+#define MASTER_CS_OUT_PIN    SPI_CS_PIN    // GP33 on v0.2.1
 
-// One SPI transaction: drive CS LOW, exchange `len` bytes via the SPI block
-// (write `tx` and capture `rx`), drive CS HIGH. Caller owns `rx` buffer.
+static inline void cs_high() { gpio_put(MASTER_CS_OUT_PIN,  1); }
+static inline void cs_low()  { gpio_put(MASTER_CS_OUT_PIN,  0); }
+static inline void sck_high(){ gpio_put(MASTER_SCK_OUT_PIN, 1); }
+static inline void sck_low() { gpio_put(MASTER_SCK_OUT_PIN, 0); }
+
+// SPI Mode 3 (CPOL=1, CPHA=1, MSB-first) bitbang.
+// Idle: SCK = HIGH. Each bit:
+//   - SCK falls (leading edge); master drives MOSI bit
+//   - half period
+//   - SCK rises (trailing edge); master samples MISO
+//   - half period
+static inline uint8_t bitbang_xfer_byte(uint8_t tx_byte) {
+    uint8_t rx_byte = 0;
+    for (int bit = 7; bit >= 0; bit--) {
+        // Drive MOSI (master shifts on first edge of cycle)
+        gpio_put(MASTER_MOSI_OUT_PIN, (tx_byte >> bit) & 1u);
+        // First edge: SCK HIGH -> LOW
+        sck_low();
+        busy_wait_us(BITBANG_HALF_PERIOD_US);
+        // Second edge: SCK LOW -> HIGH; both sides sample now
+        sck_high();
+        if (gpio_get(MASTER_MISO_IN_PIN)) {
+            rx_byte |= (1u << bit);
+        }
+        busy_wait_us(BITBANG_HALF_PERIOD_US);
+    }
+    return rx_byte;
+}
+
+// One SPI transaction: assert CS, exchange `len` bytes, deassert CS.
 static void spi_xfer(const uint8_t *tx, uint8_t *rx, size_t len) {
+    // CS setup
     cs_low();
-    delayMicroseconds(5);   // CS-setup time (slave parser reset)
-    spi_write_read_blocking(SPI_INST, tx, rx, len);
-    delayMicroseconds(5);
+    busy_wait_us(5);          // CS-setup time (slave parser reset)
+    for (size_t i = 0; i < len; i++) {
+        rx[i] = bitbang_xfer_byte(tx[i]);
+    }
+    busy_wait_us(5);
     cs_high();
-    delayMicroseconds(10);  // inter-transaction idle time
+    busy_wait_us(10);         // inter-transaction idle
 }
 
 // Print the first 3 RX bytes (the CIPO confirmation slot) hex-formatted.
@@ -70,28 +120,39 @@ static void print_cipo(const char *label, const uint8_t *rx) {
 
 void setup() {
     Serial.begin(115200);
-    delay(2000);  // give USB serial a moment to enumerate
-    Serial.println("=== G6 panel_master bench harness ===");
-    Serial.print("PANEL_REV: ");  Serial.println(PANEL_REV);
-    Serial.print("SPI clock: ");  Serial.print(MASTER_SPI_HZ / 1'000'000); Serial.println(" MHz");
 
-    // SPI master setup. Same pins as the slave build (SPI_INST is configured
-    // per-PANEL_REV in constants.cpp), but spi_set_slave(false) and driving
-    // CS manually as a GPIO so we control transaction boundaries explicitly.
-    spi_init(SPI_INST, MASTER_SPI_HZ);
-    gpio_set_function(SPI_SCK_PIN,  GPIO_FUNC_SPI);
-    gpio_set_function(SPI_MOSI_PIN, GPIO_FUNC_SPI);
-    gpio_set_function(SPI_MISO_PIN, GPIO_FUNC_SPI);
-    // CS is a regular GPIO output, NOT under SPI peripheral control.
-    gpio_init(SPI_CS_PIN);
-    gpio_set_function(SPI_CS_PIN, GPIO_FUNC_SIO);
-    gpio_set_dir(SPI_CS_PIN, GPIO_OUT);
+    // Configure bitbang GPIOs (all SIO function; no hardware SPI peripheral).
+    // Outputs: MOSI, SCK, CS — driven by the master.
+    // Input:   MISO — driven by the slave's hw-SPI TX pin.
+    gpio_init(MASTER_MOSI_OUT_PIN);
+    gpio_init(MASTER_SCK_OUT_PIN);
+    gpio_init(MASTER_CS_OUT_PIN);
+    gpio_init(MASTER_MISO_IN_PIN);
+    gpio_set_function(MASTER_MOSI_OUT_PIN, GPIO_FUNC_SIO);
+    gpio_set_function(MASTER_SCK_OUT_PIN,  GPIO_FUNC_SIO);
+    gpio_set_function(MASTER_CS_OUT_PIN,   GPIO_FUNC_SIO);
+    gpio_set_function(MASTER_MISO_IN_PIN,  GPIO_FUNC_SIO);
+    gpio_set_dir(MASTER_MOSI_OUT_PIN, GPIO_OUT);
+    gpio_set_dir(MASTER_SCK_OUT_PIN,  GPIO_OUT);
+    gpio_set_dir(MASTER_CS_OUT_PIN,   GPIO_OUT);
+    gpio_set_dir(MASTER_MISO_IN_PIN,  GPIO_IN);
+    // Idle states: SCK = HIGH (CPOL=1), CS = HIGH (deasserted), MOSI = 0.
+    sck_high();
     cs_high();
-    spi_set_format(SPI_INST, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
-    spi_set_slave(SPI_INST, false);
+    gpio_put(MASTER_MOSI_OUT_PIN, 0);
 
-    // 1-second startup delay so the slave panel completes its own boot +
-    // FIFO prime before our first transaction.
+    // Banner — printed AFTER GPIO setup so the GPIO init can't stall pre-USB.
+    delay(2000);                      // give USB CDC time to enumerate
+    Serial.println("=== G6 panel_master bench harness (bitbang SPI) ===");
+    Serial.print("PANEL_REV: ");      Serial.println(PANEL_REV);
+    Serial.print("MOSI->slave on GP");  Serial.println(MASTER_MOSI_OUT_PIN);
+    Serial.print("MISO<-slave on GP");  Serial.println(MASTER_MISO_IN_PIN);
+    Serial.print("SCK  on GP");         Serial.println(MASTER_SCK_OUT_PIN);
+    Serial.print("CS   on GP");         Serial.println(MASTER_CS_OUT_PIN);
+    Serial.print("bit half-period: "); Serial.print(BITBANG_HALF_PERIOD_US); Serial.println(" us");
+
+    // Startup delay so the slave panel completes boot + FIFO prime before
+    // our first transaction.
     delay(1000);
     Serial.println("setup() done; entering test loop");
 }
