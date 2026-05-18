@@ -26,12 +26,12 @@ Messenger messenger(display_queue);
 static const uint32_t SELFTEST_PATTERN_DURATION_MS = 10000;  // 10 s per pattern
 static const int      SELFTEST_NUM_PATTERNS        = 6;
 // Full cycle = 6 × 10 s = 60 s. Originally 5 s; bumped to 10 s because the
-// sub-phase boundaries (esp. idx 4 stretch ramp and idx 5 Oneshot demo) were
+// sub-phase boundaries (esp. idx 4 duty_cycle ramp and idx 5 Oneshot demo) were
 // too brief for a human observer to register.
 
 // Per-pattern push policy state (file scope so loop() can track edges).
 static int      st_last_idx     = -1;
-static uint8_t  st_last_stretch = 0xFF;
+static uint8_t  st_last_duty_cycle = 0xFF;
 static uint32_t st_last_push_ms = 0;
 static Pattern  st_singlepixel;            // updated by 'p' command; pushed if set
 static bool     st_singlepixel_pending = false;
@@ -42,11 +42,11 @@ static void selftest_banner() {
     Serial.println("  STAGE2 SELFTEST BUILD - do not deploy to production");
     Serial.println("  Cycle: 60 s total, 6 patterns @ 10 s each");
     Serial.println("     0..10s:  all-off (Persistent, strict-off; no glow)");
-    Serial.println("    10..20s:  all-on Gray_2 stretch=255 (full bright; USB current test)");
-    Serial.println("    20..30s:  checkerboard Gray_2 stretch=192");
-    Serial.println("    30..40s:  horizontal Gray_16 gradient stretch=255");
+    Serial.println("    10..20s:  all-on Gray_2 duty_cycle=255 (full bright; USB current test)");
+    Serial.println("    20..30s:  checkerboard Gray_2 duty_cycle=192");
+    Serial.println("    30..40s:  horizontal Gray_16 gradient duty_cycle=255");
     Serial.println("    40..50s:  Uniform brightness staircase (Gray_2 all-on):");
-    Serial.println("              off / stretch=1 / off / =16 / off / =64 / off / =255");
+    Serial.println("              off / duty_cycle=1 / off / =16 / off / =64 / off / =255");
     Serial.println("              All-off pulses bracket each lit step so floor vs off is clear");
     Serial.println("    50..60s:  Oneshot demo:");
     Serial.println("               50..52s dark | 52..57s dim glow @500Hz | 57..60s dark");
@@ -62,42 +62,42 @@ static void selftest_help() {
     Serial.println("Commands:");
     Serial.println("  b<float>     set bcm_base_on_us (e.g. b2.5)");
     Serial.println("  r<int>       set target scan period in us (100..10000; default 1000 = 1 kHz)");
-    Serial.println("  p<lr>,<lc>   light single layout pixel at (lr,lc), Gray_2 stretch=255");
-    Serial.println("  t            scan-period timing benchmark across stretch values");
+    Serial.println("  p<lr>,<lc>   light single layout pixel at (lr,lc), Gray_2 duty_cycle=255");
+    Serial.println("  t            scan-period timing benchmark across duty_cycle values");
     Serial.println("  i            re-print the boot banner");
     Serial.println("  ?            this help");
 }
 
 // Build all-off, all-on, checkerboard, gradient patterns. Helpers keep
 // selftest_push_pattern() readable.
-static void build_alloff(Pattern &pat, uint8_t stretch, DisplayMode mode) {
+static void build_alloff(Pattern &pat, uint8_t duty_cycle, DisplayMode mode) {
     pat.set_gray_level(GrayLevel::Gray_2);
-    pat.set_stretch(stretch);
+    pat.set_duty_cycle(duty_cycle);
     pat.set_mode(mode);
     pat.matrix().setZero();
 }
 
-static void build_allon_gray2(Pattern &pat, uint8_t stretch, DisplayMode mode) {
+static void build_allon_gray2(Pattern &pat, uint8_t duty_cycle, DisplayMode mode) {
     pat.set_gray_level(GrayLevel::Gray_2);
-    pat.set_stretch(stretch);
+    pat.set_duty_cycle(duty_cycle);
     pat.set_mode(mode);
     for (size_t i = 0; i < PANEL_SIZE; i++)
         for (size_t j = 0; j < PANEL_SIZE; j++)
             pat.matrix()(i, j) = 1;
 }
 
-static void build_checkerboard(Pattern &pat, uint8_t stretch, DisplayMode mode) {
+static void build_checkerboard(Pattern &pat, uint8_t duty_cycle, DisplayMode mode) {
     pat.set_gray_level(GrayLevel::Gray_2);
-    pat.set_stretch(stretch);
+    pat.set_duty_cycle(duty_cycle);
     pat.set_mode(mode);
     for (size_t i = 0; i < PANEL_SIZE; i++)
         for (size_t j = 0; j < PANEL_SIZE; j++)
             pat.matrix()(i, j) = ((i + j) & 1) ? 1 : 0;
 }
 
-static void build_gradient_gray16(Pattern &pat, uint8_t stretch, DisplayMode mode) {
+static void build_gradient_gray16(Pattern &pat, uint8_t duty_cycle, DisplayMode mode) {
     pat.set_gray_level(GrayLevel::Gray_16);
-    pat.set_stretch(stretch);
+    pat.set_duty_cycle(duty_cycle);
     pat.set_mode(mode);
     for (size_t i = 0; i < PANEL_SIZE; i++)
         for (size_t j = 0; j < PANEL_SIZE; j++)
@@ -105,7 +105,7 @@ static void build_gradient_gray16(Pattern &pat, uint8_t stretch, DisplayMode mod
             pat.matrix()(i, j) = (uint8_t)((j * 15) / (PANEL_SIZE - 1));
 }
 
-// idx=4 staircase: uniform Gray_2 all-on pattern modulated by 4 stretch levels,
+// idx=4 staircase: uniform Gray_2 all-on pattern modulated by 4 duty_cycle levels,
 // bracketed by all-off pulses so the eye can distinguish "barely visible" from
 // "actually off." Returns 0 for the all-off segments.
 //
@@ -121,7 +121,7 @@ static void build_gradient_gray16(Pattern &pat, uint8_t stretch, DisplayMode mod
 //
 // Each transition is logged on serial via the sub-phase log in
 // selftest_push_pattern.
-static uint8_t selftest_stretch_for(uint32_t t_in_window_ms) {
+static uint8_t selftest_duty_cycle_for(uint32_t t_in_window_ms) {
     if (t_in_window_ms <   500) return 0;
     if (t_in_window_ms <  2500) return 1;
     if (t_in_window_ms <  3000) return 0;
@@ -152,26 +152,26 @@ static void selftest_push_pattern(int idx, uint32_t t_ms) {
 
     if (idx == 4) {
         // Brightness staircase on a uniform Gray_2 all-on pattern. All-off
-        // pulses (stretch=0) bracket each lit step so the eye can tell
+        // pulses (duty_cycle=0) bracket each lit step so the eye can tell
         // "barely visible glow" from "actually off." Log every transition
         // with expected brightness percentage so the host operator has a
         // numeric reference against what they're seeing.
-        uint8_t s = selftest_stretch_for(t_in_window);
-        if (s != st_last_stretch) {
+        uint8_t s = selftest_duty_cycle_for(t_in_window);
+        if (s != st_last_duty_cycle) {
             need_push = true;
-            Serial.print("  [idx=4 sub stretch=");
+            Serial.print("  [idx=4 sub duty_cycle=");
             Serial.print(s);
             Serial.print(" t=");
             Serial.print(t_in_window);
             Serial.print("ms ~");
-            // Expected per-pixel duty as % of full (stretch=255, intensity=15)
-            // Gray_2 at stretch=s, intensity=1, single weight-15 plane:
+            // Expected per-pixel duty as % of full (duty_cycle=255, intensity=15)
+            // Gray_2 at duty_cycle=s, intensity=1, single weight-15 plane:
             //   ON cycles = max(450*15*s/255 - 5, 0) + 5  ≈ 26.5*s
             // Duty at 1 kHz refresh ≈ ON cycles / 150_000 cycles
-            // As % of full (stretch=255 → ~4.5% duty):
+            // As % of full (duty_cycle=255 → ~4.5% duty):
             //   pct_of_full ≈ (s / 255) * 100
-            // Numerically: stretch=1 → 0.4%, 16 → 6%, 64 → 25%, 255 → 100%
-            // (Slight nonlinearity at very low stretch due to PIO 5-cycle floor.)
+            // Numerically: duty_cycle=1 → 0.4%, 16 → 6%, 64 → 25%, 255 → 100%
+            // (Slight nonlinearity at very low duty_cycle due to PIO 5-cycle floor.)
             int pct = (s == 0) ? 0 : (s == 1) ? 1 : (int)((uint32_t)s * 100 / 255);
             Serial.print(pct);
             Serial.print("% of full");
@@ -180,16 +180,16 @@ static void selftest_push_pattern(int idx, uint32_t t_ms) {
             Serial.println("]");
         }
         if (need_push) {
-            // Uniform Gray_2 all-on pattern. At stretch=0 the strict-off guard
+            // Uniform Gray_2 all-on pattern. At duty_cycle=0 the strict-off guard
             // in precompute_bcm_data zeroes all column words so the panel goes
-            // fully dark regardless of pattern content. At stretch>0 every
+            // fully dark regardless of pattern content. At duty_cycle>0 every
             // pixel lights at the chosen modulation depth.
             if (s == 0) {
                 build_alloff(pat, 0, DisplayMode::Persistent);
             } else {
                 build_allon_gray2(pat, s, DisplayMode::Persistent);
             }
-            st_last_stretch = s;
+            st_last_duty_cycle = s;
         }
     } else if (idx == 5) {
         // Oneshot brightness-contrast demo. A single Oneshot scan is ~45 µs of
@@ -250,15 +250,15 @@ static void selftest_handle_serial() {
         return;
     }
     if (c == 't') {
-        // Timing benchmark. Drive each test stretch value as a Persistent
+        // Timing benchmark. Drive each test duty_cycle value as a Persistent
         // pattern, let core 1 stabilize on it, then measure scan period stats
         // over a fixed sampling window.
-        Serial.println("Scan-period benchmark (Gray_2 all-on @ different stretch values):");
+        Serial.println("Scan-period benchmark (Gray_2 all-on @ different duty_cycle values):");
         Serial.print("  target_period_us = ");
         Serial.println(display_target_period_us);
-        const uint8_t test_stretches[] = {0, 1, 16, 64, 192, 255};
-        for (size_t k = 0; k < sizeof(test_stretches); k++) {
-            uint8_t s = test_stretches[k];
+        const uint8_t test_duty_cyclees[] = {0, 1, 16, 64, 192, 255};
+        for (size_t k = 0; k < sizeof(test_duty_cyclees); k++) {
+            uint8_t s = test_duty_cyclees[k];
             Pattern bp;
             if (s == 0) build_alloff(bp, 0, DisplayMode::Persistent);
             else        build_allon_gray2(bp, s, DisplayMode::Persistent);
@@ -270,7 +270,7 @@ static void selftest_handle_serial() {
             ScanStats st; display_get_scan_stats(st);
             uint32_t avg_period = st.count ? (st.period_us_total / st.count) : 0;
             uint32_t avg_scan   = st.count ? (st.scan_us_total   / st.count) : 0;
-            Serial.print("  stretch=");   Serial.print(s);
+            Serial.print("  duty_cycle=");   Serial.print(s);
             Serial.print("  scans=");     Serial.print(st.count);
             Serial.print("  period(avg/min/max us)=");
             Serial.print(avg_period); Serial.print("/");
@@ -295,7 +295,7 @@ static void selftest_handle_serial() {
         // Restore the selftest cycle by invalidating last_idx so the next
         // loop iteration re-pushes whatever pattern idx requires.
         st_last_idx     = -1;
-        st_last_stretch = 0xFF;
+        st_last_duty_cycle = 0xFF;
         return;
     }
     if (c == 'r') {
@@ -326,7 +326,7 @@ static void selftest_handle_serial() {
         // precompute_bcm_data() with the new base_T. Cheapest way: invalidate
         // last-idx so the next selftest_push_pattern() rebuilds and enqueues.
         st_last_idx     = -1;
-        st_last_stretch = 0xFF;
+        st_last_duty_cycle = 0xFF;
         Serial.print("base_T = "); Serial.print(bcm_base_on_us, 3); Serial.println(" us");
         return;
     }
@@ -342,7 +342,7 @@ static void selftest_handle_serial() {
             return;
         }
         st_singlepixel.set_gray_level(GrayLevel::Gray_2);
-        st_singlepixel.set_stretch(255);
+        st_singlepixel.set_duty_cycle(255);
         st_singlepixel.set_mode(DisplayMode::Persistent);
         st_singlepixel.matrix().setZero();
         st_singlepixel.matrix()((size_t)lr, (size_t)lc) = 1;
@@ -382,9 +382,9 @@ void loop() {
         const char *desc = "?";
         switch (cur_idx) {
             case 0: desc = "all-off Persistent (strict-off test)"; break;
-            case 1: desc = "all-on Gray_2 stretch=255 (full bright + USB-current stress)"; break;
-            case 2: desc = "checkerboard Gray_2 stretch=192"; break;
-            case 3: desc = "Gray_16 horizontal gradient stretch=255"; break;
+            case 1: desc = "all-on Gray_2 duty_cycle=255 (full bright + USB-current stress)"; break;
+            case 2: desc = "checkerboard Gray_2 duty_cycle=192"; break;
+            case 3: desc = "Gray_16 horizontal gradient duty_cycle=255"; break;
             case 4: desc = "Brightness staircase (Gray_2 all-on): off/1/off/16/off/64/off/255 (logged below)"; break;
             case 5: desc = "Oneshot demo: 2s dark | 5s glow | 3s dark"; break;
         }

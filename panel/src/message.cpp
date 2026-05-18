@@ -257,8 +257,8 @@ void Message::from_pattern_gray_2(Pattern &pat, uint8_t protocol) {
         }
     }
 
-    // Add stretch value (last item)
-    data_.at(total_size-1) = pat.stretch();
+    // Add duty_cycle value (last item)
+    data_.at(total_size-1) = pat.duty_cycle();
     set_parity_bit();
 }
 
@@ -297,15 +297,15 @@ void Message::from_pattern_gray_16(Pattern &pat, uint8_t protocol) {
         }
     }
 
-    // Add stretch value (last item)
-    data_.at(total_size-1) = pat.stretch();
+    // Add duty_cycle value (last item)
+    data_.at(total_size-1) = pat.duty_cycle();
     set_parity_bit();
 }
 
 
 void Message::to_pattern_gray_2(Pattern &pat) {
     // Accept V1 Oneshot (0x10) and V1 Persistent (0x11) — both share the
-    // 50 B + stretch payload shape. Mode is set by the caller (to_pattern()).
+    // 50 B + duty_cycle payload shape. Mode is set by the caller (to_pattern()).
     uint8_t cmd = command_byte();
     if (cmd != CMD_ID_DISPLAY_GRAY_2 && cmd != CMD_ID_DISPLAY_GRAY_2_PERSIST) {
         return;
@@ -321,14 +321,14 @@ void Message::to_pattern_gray_2(Pattern &pat) {
             pixel_num++;
         }
     }
-    // Set stretch to last payload value
-    pat.set_stretch(data_.at(num_bytes_-1));
+    // Set duty_cycle to last payload value
+    pat.set_duty_cycle(data_.at(num_bytes_-1));
 }
 
 
 void Message::to_pattern_gray_16(Pattern &pat) {
     // Accept V1 Oneshot (0x30) and V1 Persistent (0x31) — same 200 B +
-    // stretch payload shape; mode is set by to_pattern().
+    // duty_cycle payload shape; mode is set by to_pattern().
     uint8_t cmd = command_byte();
     if (cmd != CMD_ID_DISPLAY_GRAY_16 && cmd != CMD_ID_DISPLAY_GRAY_16_PERSIST) {
         return;
@@ -350,7 +350,7 @@ void Message::to_pattern_gray_16(Pattern &pat) {
             pixel_num++;
         }
     }
-    // Set stretch to last payload value
-    pat.set_stretch(data_.at(num_bytes_-1));
+    // Set duty_cycle to last payload value
+    pat.set_duty_cycle(data_.at(num_bytes_-1));
 }
 

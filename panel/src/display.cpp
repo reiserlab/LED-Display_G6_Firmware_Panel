@@ -9,9 +9,9 @@
 // ---- Scan timing instrumentation + target-period enforcement ----
 //
 // Default 1000 µs = 1 kHz refresh. Tunable at runtime via the selftest 'r'
-// command. At low stretch the scan completes in tens of µs and we busy-wait
-// for the remaining time to maintain a constant scan period; this is what
-// gives stretch its intended linear-PWM brightness semantics.
+// command. At low duty_cycle the scan completes in tens of µs and we busy-
+// wait for the remaining time to maintain a constant scan period; this is
+// what gives duty_cycle its intended linear-PWM brightness semantics.
 volatile uint32_t display_target_period_us = 1000;
 
 static volatile uint32_t s_scan_count        = 0;
@@ -122,15 +122,16 @@ void Display::show() {
     //   N = 1 for Gray_2 (single weight-15 plane)
     //   N = 4 for Gray_16 (weights {1, 2, 4, 8})
     //
-    // Strict-off (stretch == 0): bcm_plane_data column words are all zero
+    // Strict-off (duty_cycle == 0): bcm_plane_data column words are all zero
     // (precompute_bcm_data guard); the scan still runs but drives no LEDs.
     //
     // After the scan, busy-wait until `display_target_period_us` has elapsed
     // since the start of this scan. This enforces a fixed scan rate so that
-    // brightness ∝ ON_time / Period. Without this, low-stretch scans complete
-    // in tens of µs and loop1() calls show() back-to-back — the LED-off
-    // portion of the duty cycle shrinks, collapsing the stretch=1 vs
-    // stretch=255 brightness ratio from the intended ~200x to a useless ~4x.
+    // brightness ∝ ON_time / Period. Without this, low-duty_cycle scans
+    // complete in tens of µs and loop1() calls show() back-to-back — the
+    // LED-off portion of the duty cycle shrinks, collapsing the
+    // duty_cycle=1 vs duty_cycle=255 brightness ratio from the intended
+    // ~260x to a useless ~4x.
 
     uint32_t t_start = time_us_32();
 
@@ -171,7 +172,7 @@ void Display::show() {
     uint32_t scan_us    = t_scan_end - t_start;
 
     // Pad to target period. If the scan already overran the target (e.g.,
-    // Gray_16 stretch=255 needs ~920 µs which is close to 1000 µs), skip
+    // Gray_16 duty_cycle=255 needs ~920 µs which is close to 1000 µs), skip
     // padding and let the scan rate degrade gracefully.
     uint32_t target = display_target_period_us;
     if (scan_us < target) {

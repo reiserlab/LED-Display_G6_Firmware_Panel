@@ -22,7 +22,7 @@
 // PIO ON overhead: the column program takes 5 cycles of overhead per plane
 // (pull + mov + jmp_loop_entry + mov + out). At sys_clk = 150 MHz this is
 // ~33 ns per plane regardless of delay value. Used by bcm.cpp to compute
-// the brightness floor (very-low-stretch nonlinearity).
+// the brightness floor (very-low-duty_cycle nonlinearity).
 constexpr uint32_t PIO_ON_OVERHEAD_CYCLES = 5;
 
 // Load PIO program + claim a free SM. Returns true on success, false if no

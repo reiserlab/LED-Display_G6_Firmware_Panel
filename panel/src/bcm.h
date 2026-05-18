@@ -12,10 +12,10 @@
 //                                         Gray_16's full-bright sum)
 //   Gray_16: 4 planes, weights {1,2,4,8} (standard 4-bit BCM)
 //
-// Total ON time at max + stretch=255 matches between Gray_2 (pixel=1) and
+// Total ON time at max + duty_cycle=255 matches between Gray_2 (pixel=1) and
 // Gray_16 (pixel=15): both = 15 * base_T = 45 µs per row at base_T = 3 µs.
 //
-// Strict-off: stretch == 0 zeroes all column words. The PIO program still
+// Strict-off: duty_cycle == 0 zeroes all column words. The PIO program still
 // emits its 33 ns (5-cycle) overhead pulse per plane, but with zero column
 // words no LEDs light. Documented in the spec.
 
@@ -24,7 +24,7 @@
 #include "pattern.h"
 
 // Target 1 kHz refresh. Per-row budget: 1 ms / 20 rows = 50 µs.
-// At full intensity + stretch=255: weights sum to 15, so 15 * 3 µs = 45 µs ON
+// At full intensity + duty_cycle=255: weights sum to 15, so 15 * 3 µs = 45 µs ON
 // per row + ~1 µs row-switch overhead = ~46 µs / row → ~920 µs scan ≈ 1.09 kHz.
 //
 // Runtime-tunable (NOT constexpr) so the selftest can retune brightness via a

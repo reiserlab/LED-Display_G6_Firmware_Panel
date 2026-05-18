@@ -10,8 +10,8 @@ const uint8_t CMD_PROTOCOL = CMD_PROTOCOL_V1;  // default outgoing version
 const size_t HEADER_SIZE = 2;
 const size_t PAYLOAD_MINIMUM_SIZE = 1;
 const size_t PAYLOAD_COMMS_CHECK = 200;
-const size_t PAYLOAD_DISPLAY_GRAY_2 = 51;    // 50 pattern + 1 stretch
-const size_t PAYLOAD_DISPLAY_GRAY_16 = 201;  // 200 pattern + 1 stretch
+const size_t PAYLOAD_DISPLAY_GRAY_2 = 51;    // 50 pattern + 1 duty_cycle
+const size_t PAYLOAD_DISPLAY_GRAY_16 = 201;  // 200 pattern + 1 duty_cycle
 const size_t MESSAGE_MINIMUM_SIZE = HEADER_SIZE + PAYLOAD_MINIMUM_SIZE;
 
 const PayloadSizeUMap PAYLOAD_SIZE_UMAP {

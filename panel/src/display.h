@@ -33,12 +33,12 @@ class Display {
 // ---- Scan timing instrumentation + target-period enforcement (S2.x) ----
 //
 // `display_target_period_us` is the wall-clock period that Display::show()
-// pads to. At low stretch the scan completes quickly and we busy-wait for
+// pads to. At low duty_cycle the scan completes quickly and we busy-wait for
 // the remainder, ensuring the LED-off portion of the duty cycle dominates.
-// This is critical for stretch semantics: brightness ∝ ON_time / Period,
+// This is critical for duty_cycle semantics: brightness ∝ ON_time / Period,
 // and the spec assumes Period is fixed (1 kHz refresh). Without this,
-// the scan rate scales with stretch and the perceived brightness ratio
-// between stretch=1 and stretch=255 collapses to ~3-5x instead of ~200x.
+// the scan rate scales with duty_cycle and the perceived brightness ratio
+// between duty_cycle=1 and duty_cycle=255 collapses to ~3-5x instead of ~260x.
 //
 // Default: 1000 µs = 1 kHz refresh.
 extern volatile uint32_t display_target_period_us;

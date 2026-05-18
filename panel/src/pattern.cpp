@@ -15,13 +15,13 @@ void Pattern::set_gray_level(GrayLevel gray_level) {
 }
 
 
-uint8_t Pattern::stretch() {
-    return stretch_;
+uint8_t Pattern::duty_cycle() {
+    return duty_cycle_;
 }
 
 
-void Pattern::set_stretch(uint8_t stretch) {
-    stretch_ = stretch;
+void Pattern::set_duty_cycle(uint8_t duty_cycle) {
+    duty_cycle_ = duty_cycle;
 }
 
 

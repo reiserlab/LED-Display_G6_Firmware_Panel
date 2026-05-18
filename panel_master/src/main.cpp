@@ -27,9 +27,9 @@
 //
 // Test sequence (1 Hz cadence):
 //   1. COMM_CHECK with canonical payload 0..199
-//   2. Gray_2 cross pattern (V1 Persistent 0x11), stretch=192
-//   3. Gray_16 gradient pattern (V1 Persistent 0x31), stretch=128
-//   4. Stretch sweep on Gray_16 Persistent
+//   2. Gray_2 cross pattern (V1 Persistent 0x11), duty_cycle=192
+//   3. Gray_16 gradient pattern (V1 Persistent 0x31), duty_cycle=128
+//   4. Duty cycle sweep on Gray_16 Persistent
 //   4b. V1 Oneshot burst (500 frames at ~500 Hz)
 //   5. COMM_CHECK with one byte deliberately flipped (validation should fail)
 //   6. Truncated frame (length check should fail)
@@ -161,11 +161,11 @@ void setup() {
 // Helper: build a Gray_2 row+column cross pattern and serialize it.
 // `protocol_version` selects which header byte (V1 = 0x01 only for now).
 // `cmd_id` selects mode: 0x10 (Oneshot) or 0x11 (Persistent).
-static void build_gray_2_cross(uint8_t *out, size_t out_len, uint8_t stretch,
+static void build_gray_2_cross(uint8_t *out, size_t out_len, uint8_t duty_cycle,
                                uint8_t protocol_version, uint8_t cmd_id) {
     Pattern pat;
     pat.set_gray_level(GrayLevel::Gray_2);
-    pat.set_stretch(stretch);
+    pat.set_duty_cycle(duty_cycle);
     // Cross through center: row 10 and column 10 all ON
     for (size_t k = 0; k < PANEL_SIZE; k++) {
         pat.matrix()(10, k) = 1;
@@ -188,11 +188,11 @@ static void build_gray_2_cross(uint8_t *out, size_t out_len, uint8_t stretch,
 // Helper: build a Gray_16 gradient pattern (intensity = col index ramps 0..15).
 // `protocol_version` selects header byte; `cmd_id` selects 0x30 (Oneshot) or
 // 0x31 (Persistent).
-static void build_gray_16_gradient(uint8_t *out, size_t out_len, uint8_t stretch,
+static void build_gray_16_gradient(uint8_t *out, size_t out_len, uint8_t duty_cycle,
                                    uint8_t protocol_version, uint8_t cmd_id) {
     Pattern pat;
     pat.set_gray_level(GrayLevel::Gray_16);
-    pat.set_stretch(stretch);
+    pat.set_duty_cycle(duty_cycle);
     for (size_t i = 0; i < PANEL_SIZE; i++) {
         for (size_t j = 0; j < PANEL_SIZE; j++) {
             pat.matrix()(i, j) = uint8_t(j * 15 / (PANEL_SIZE - 1));  // 0..15
@@ -221,7 +221,7 @@ static void build_comm_check(uint8_t *out, size_t out_len) {
 
 void loop() {
     static uint32_t iter = 0;
-    static uint8_t  stretch_sweep = 0;
+    static uint8_t  duty_cycle_sweep = 0;
     iter++;
 
     // -- Step 1: COMM_CHECK -------------------------------------------------
@@ -236,7 +236,7 @@ void loop() {
         print_cipo("", rx);
     }
 
-    // -- Step 2: Gray_2 cross V1 PERSISTENT (0x11), stretch=192 --------------
+    // -- Step 2: Gray_2 cross V1 PERSISTENT (0x11), duty_cycle=192 --------------
     // Persistent: one send → display stays visible until next message. Easy
     // to verify visually at 1 Hz cadence (steps 2-4 each replace the prior
     // pattern, so the panel cycles through them).
@@ -249,7 +249,7 @@ void loop() {
         print_cipo("Gray_2 cross PERSIST s=192", rx);
     }
 
-    // -- Step 3: Gray_16 gradient V1 PERSISTENT (0x31), stretch=128 ---------
+    // -- Step 3: Gray_16 gradient V1 PERSISTENT (0x31), duty_cycle=128 ---------
     {
         uint8_t tx[HEADER_SIZE + PAYLOAD_DISPLAY_GRAY_16] = {0};
         uint8_t rx[HEADER_SIZE + PAYLOAD_DISPLAY_GRAY_16] = {0};
@@ -259,18 +259,18 @@ void loop() {
         print_cipo("Gray_16 gradient PERSIST s=128", rx);
     }
 
-    // -- Step 4: stretch sweep (V1 Persistent gradient, one step per iter) --
+    // -- Step 4: duty_cycle sweep (V1 Persistent gradient, one step per iter) --
     {
         uint8_t tx[HEADER_SIZE + PAYLOAD_DISPLAY_GRAY_16] = {0};
         uint8_t rx[HEADER_SIZE + PAYLOAD_DISPLAY_GRAY_16] = {0};
-        build_gray_16_gradient(tx, sizeof(tx), stretch_sweep,
+        build_gray_16_gradient(tx, sizeof(tx), duty_cycle_sweep,
                                CMD_PROTOCOL_V1, CMD_ID_DISPLAY_GRAY_16_PERSIST);
         spi_xfer(tx, rx, sizeof(tx));
-        Serial.print("Gray_16 sweep stretch=");
-        Serial.print(stretch_sweep);
+        Serial.print("Gray_16 sweep duty_cycle=");
+        Serial.print(duty_cycle_sweep);
         Serial.print(" -> ");
         print_cipo("", rx);
-        stretch_sweep = (stretch_sweep + 13) & 0xFF;  // ~20 steps over 0..255
+        duty_cycle_sweep = (duty_cycle_sweep + 13) & 0xFF;  // ~20 steps over 0..255
     }
 
     // -- Step 4b: V1 ONESHOT burst (0x10 streamed at ~500 Hz for 1 second) --

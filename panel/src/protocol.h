@@ -8,7 +8,7 @@ extern const uint8_t CMD_PROTOCOL_V1;
 extern const uint8_t CMD_PROTOCOL;   // default for outgoing; firmware accepts V1 inbound only
 
 // Command opcodes use low-nibble mode encoding:
-//   high nibble = pattern type (1 = 2L, 3 = 16L, 5 = PSRAM-indexed, 6 = PSRAM-w-stretch,
+//   high nibble = pattern type (1 = 2L, 3 = 16L, 5 = PSRAM-indexed, 6 = PSRAM-w-duty-cycle,
 //                               7 = Predefined-pattern)
 //   low nibble  = mode        (0 = Oneshot, 1 = Persistent, 2 = Triggered, 3 = Gated)
 //
@@ -17,7 +17,7 @@ extern const uint8_t CMD_PROTOCOL;   // default for outgoing; firmware accepts V
 //                           (Oneshot, Persistent, Triggered, Gated × 2L, 16L) + COMM_CHECK
 //   V2 (header 0x02/0x82) = PSRAM-backed display — patterns stored on-panel, indexed
 //                           (PSRAM write, PSRAM reset, PSRAM display × 4 modes,
-//                            PSRAM display with explicit stretch × 4 modes)
+//                            PSRAM display with explicit duty_cycle × 4 modes)
 //   V3 (header 0x03/0x83) = everything else — diagnostics, predefined patterns,
 //                           future feature classes
 // V1 firmware (this build) implements COMM_CHECK + Oneshot + Persistent only.
@@ -27,13 +27,13 @@ enum CommandId: uint8_t {
     // ---- V1 (header byte 0x01 / 0x81) — live SPI display ----
     CMD_ID_COMMS_CHECK              = 0x01,
 
-    // 2-Level (1bpp) display, 50 B pixel + 1 B stretch payload
+    // 2-Level (1bpp) display, 50 B pixel + 1 B duty_cycle payload
     CMD_ID_DISPLAY_GRAY_2           = 0x10,   // Oneshot     — single scan, then idle
     CMD_ID_DISPLAY_GRAY_2_PERSIST   = 0x11,   // Persistent  — continuous refresh until next cmd
     // 0x12 — V1 Triggered  (2L)  (specced; not implementing now)
     // 0x13 — V1 Gated      (2L)  (specced; not implementing now)
 
-    // 16-Level (4bpp) display, 200 B pixel + 1 B stretch payload
+    // 16-Level (4bpp) display, 200 B pixel + 1 B duty_cycle payload
     CMD_ID_DISPLAY_GRAY_16          = 0x30,   // Oneshot
     CMD_ID_DISPLAY_GRAY_16_PERSIST  = 0x31,   // Persistent
     // 0x32 — V1 Triggered  (16L) (specced; not implementing now)
@@ -42,9 +42,9 @@ enum CommandId: uint8_t {
     // ---- V2 reservations (specced; header 0x02/0x82) — PSRAM-backed display ----
     //   0x0F                 — Reset PSRAM
     //   0x3F                 — Write 16L pattern to PSRAM (16L only; no 2L PSRAM write)
-    //   0x50/0x51/0x52/0x53  — Display PSRAM index, mode in low nibble (stretch implicit
-    //                          from the value stored at PSRAM-write time)
-    //   0x60/0x61/0x62/0x63  — Display PSRAM index with explicit stretch byte
+    //   0x50/0x51/0x52/0x53  — Display PSRAM index, mode in low nibble (duty_cycle
+    //                          implicit from the value stored at PSRAM-write time)
+    //   0x60/0x61/0x62/0x63  — Display PSRAM index with explicit duty_cycle byte
     // Symbols below are placeholders; not dispatched by Messenger today.
     CMD_ID_RESET_PSRAM       = 0x0F,
     CMD_ID_SET_PSRAM_GRAY_16 = 0x3F,

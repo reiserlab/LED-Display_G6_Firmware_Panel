@@ -7,7 +7,7 @@
 //   - Gray_2: 1 plane with weight 15 (donor's per-plane weights array is
 //     simplified to a fixed branch)
 //   - Gray_16: 4 planes with weights {1, 2, 4, 8} (standard BCM)
-//   - stretch == 0 zeroes ALL column words (strict-off per spec)
+//   - duty_cycle == 0 zeroes ALL column words (strict-off per spec)
 
 #include "bcm.h"
 #include "constants.h"
@@ -30,7 +30,7 @@ void precompute_scan_masks() {
 
 
 void precompute_bcm_data(Pattern &pat) {
-    uint8_t stretch = pat.stretch();
+    uint8_t duty_cycle = pat.duty_cycle();
     uint8_t bcm_bits;
     uint32_t bcm_weights[4] = {0, 0, 0, 0};
 
@@ -45,11 +45,11 @@ void precompute_bcm_data(Pattern &pat) {
         bcm_weights[3]  = 8;
     }
 
-    // Strict-off guard: at stretch == 0, zero ALL column words so no LEDs light.
-    // The PIO program will still emit its 33 ns (5-cycle) overhead pulse per
-    // plane, but with col_word == 0 those overhead pulses drive no LEDs.
-    // Documented spec semantics.
-    if (stretch == 0) {
+    // Strict-off guard: at duty_cycle == 0, zero ALL column words so no LEDs
+    // light. The PIO program will still emit its 33 ns (5-cycle) overhead
+    // pulse per plane, but with col_word == 0 those overhead pulses drive no
+    // LEDs. Documented spec semantics.
+    if (duty_cycle == 0) {
         for (int r = 0; r < PANEL_SIZE; r++) {
             for (int b = 0; b < 4; b++) {
                 bcm_plane_data[r][b][0] = 0x00000;
@@ -61,15 +61,15 @@ void precompute_bcm_data(Pattern &pat) {
 
     uint32_t base_cycles = (uint32_t)(bcm_base_on_us * (float)cycles_per_us);
 
-    // Per-plane PIO delay = (base_cycles * weight * stretch / 255) - 5 overhead.
-    // At very low stretch the scaled time may fall below the 5-cycle overhead
-    // floor — clamp to 0 (single 33 ns overhead pulse, documented brightness
-    // floor at the bottom of the scale).
+    // Per-plane PIO delay = (base_cycles * weight * duty_cycle / 255) - 5
+    // overhead. At very low duty_cycle the scaled time may fall below the
+    // 5-cycle overhead floor — clamp to 0 (single 33 ns overhead pulse,
+    // documented brightness floor at the bottom of the scale).
     uint32_t pio_delays[4] = {0, 0, 0, 0};
     for (int b = 0; b < bcm_bits; b++) {
         uint32_t scaled = (uint32_t)((uint64_t)base_cycles
                                     * bcm_weights[b]
-                                    * stretch / 255);
+                                    * duty_cycle / 255);
         pio_delays[b] = (scaled > PIO_ON_OVERHEAD_CYCLES)
                       ? (scaled - PIO_ON_OVERHEAD_CYCLES) : 0;
     }

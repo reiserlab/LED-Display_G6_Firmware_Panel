@@ -170,7 +170,7 @@ void Messenger::on_cmd_display_gray_16(Message &msg) {
 
 //Pattern pat;
 //pat.set_gray_level(GrayLevel::Gray_2);
-//pat.set_stretch(255);
+//pat.set_duty_cycle(255);
 //
 //pat.matrix() << 
 //    1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
