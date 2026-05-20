@@ -35,9 +35,9 @@ pio run -d panel        -e pico_v031
    to multiple panels) and is electrically supported, but watch for two
    gotchas:
    - **USB-port current limit (~500 mA).** Two panels at high brightness
-     (stretch ≈ 255 with many LEDs lit) can pull > 500 mA and brown out.
-     Bench sequence below uses moderate stretch values; if you see USB
-     dropouts, drop the stretch sweep range or use a powered USB hub.
+     (duty_cycle ≈ 255 with many LEDs lit) can pull > 500 mA and brown out.
+     Bench sequence below uses moderate duty_cycle values; if you see USB
+     dropouts, drop the duty_cycle sweep range or use a powered USB hub.
    - **No backfeed.** Only one panel may be USB-connected at a time. Plugging
      a second USB into the slave while +5V is also bridged via J2 would cross
      two USB power rails. **Do not do that.**
@@ -86,10 +86,12 @@ temporarily swap which panel gets the USB cable.
 The master loops through:
 
 1. **COMM_CHECK** (canonical payload 0..199) — expect CIPO `[0x81 0x00 0x00]`
-   on first run (slave empty buffer) or `[parity|0x01, prev_cmd, prev_chk]` thereafter.
-2. **Gray_2 cross**, stretch=192 — visual: row+column-10 cross at high brightness.
-3. **Gray_16 gradient**, stretch=128 — visual: left-to-right brightness ramp at half intensity.
-4. **Stretch sweep** on Gray_16 gradient — brightness ramps each iteration.
+   on first run (slave empty buffer) or `[parity|0x01, prev_cmd, prev_crc]` thereafter.
+   CRC byte is CRC-8/AUTOSAR per `g6_01-panel-protocol.md` § CRC-8 algorithm.
+   Canonical 202-byte COMM_CHECK CRC = `0x8B`.
+2. **Gray_2 cross**, duty_cycle=192 — visual: row+column-10 cross at high brightness.
+3. **Gray_16 gradient**, duty_cycle=128 — visual: left-to-right brightness ramp at half intensity.
+4. **Duty-cycle sweep** on Gray_16 gradient — brightness ramps each iteration.
 5. **COMM_CHECK with one byte flipped** + follow-up COMM_CHECK — expect
    `[parity|0x01, 0xFF, 0x00]` on the follow-up (the COMM_CHECK-fail sentinel).
 6. **Truncated frame** (3 bytes, length check fails) — CIPO unchanged from prev valid.

@@ -38,7 +38,7 @@ class Message {
         void to_comms_check(uint8_t protocol=CMD_PROTOCOL);
 
         uint8_t calculate_parity_bit();
-        uint8_t calculate_8bit_checksum();
+        uint8_t calculate_crc8();
 
         // S1.3 helper: compute parity bit for a 3-byte CIPO confirmation
         // {version_byte_no_parity, cmd, checksum}. version_byte_no_parity is the
