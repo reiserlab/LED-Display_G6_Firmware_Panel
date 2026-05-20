@@ -104,7 +104,7 @@ void Messenger::update() {
                 in_version, 0xFF, 0x00);
             panel_spi_arm_confirmation(hdr, 0xFF, 0x00);
         } else {
-            uint8_t chk = msg.calculate_8bit_checksum();
+            uint8_t chk = msg.calculate_crc8();
             uint8_t hdr = Message::header_with_parity_for_3byte(
                 in_version, cmd_id, chk);
             panel_spi_arm_confirmation(hdr, cmd_id, chk);

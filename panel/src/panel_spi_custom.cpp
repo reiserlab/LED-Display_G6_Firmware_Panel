@@ -9,7 +9,10 @@
 // Per docs/development/g6_01-panel-protocol.md § Confirmation message, the
 // panel must send a 3-byte confirmation slot on CIPO during the next CS-active
 // window after each valid received message:
-//     [header_with_recomputed_parity] [echoed_cmd] [8-bit additive checksum]
+//     [header_with_recomputed_parity] [echoed_cmd] [8-bit CRC-8/AUTOSAR]
+// (per g6_01-panel-protocol.md § CRC-8 algorithm; computed by
+// Message::calculate_crc8() over {header_with_parity_cleared, cmd, payload}
+// of the incoming message)
 // Empty-buffer (boot or just-consumed) sentinel: {0x81, 0x00, 0x00}.
 // COMM_CHECK byte-mismatch sentinel: {header, 0xFF, 0x00}  (this firmware's
 // chosen encoding; see plan § Spec amendment).
