@@ -37,6 +37,7 @@ static uint8_t  st_last_duty_cycle = 0xFF;
 static uint32_t st_last_push_ms = 0;
 static Pattern  st_singlepixel;            // updated by 'p' command; pushed if set
 static bool     st_singlepixel_pending = false;
+static bool     autocycle_paused = false;   // 'x' toggles; halts phase pushes for bench eyeball tests
 
 static void selftest_banner() {
     Serial.println("");
@@ -59,7 +60,7 @@ static void selftest_banner() {
     Serial.println("            e<slot>=raise error glyph (slot 0=ERR, 1-5=PE01-05, 100=CE00),");
     Serial.println("            T=push Triggered all-on Gray_2 (drive GP45 with edges),");
     Serial.println("            g=push Gated checkerboard (drive GP45 level),");
-    Serial.println("            t=timing benchmark, i=banner, ?=help");
+    Serial.println("            x=toggle autocycle pause, t=timing benchmark, i=banner, ?=help");
     Serial.println("======================================================");
 }
 
@@ -72,6 +73,7 @@ static void selftest_help() {
     Serial.println("  T            push Triggered all-on Gray_2 pattern (V1 0x12) — drives one row per EINT rising edge on GP45");
     Serial.println("  g            push Gated checkerboard pattern (V1 0x13) — refreshes only while GP45 is HIGH");
     Serial.println("  t            scan-period timing benchmark across duty_cycle values");
+    Serial.println("  x            toggle the 60s autocycle on/off — pause for clean T/g/p observation");
     Serial.println("  i            re-print the boot banner");
     Serial.println("  ?            this help");
 }
@@ -413,6 +415,22 @@ static void selftest_handle_serial() {
         Serial.print(lc); Serial.println(") queued");
         return;
     }
+    if (c == 'x') {
+        // Toggle the 6-pattern autocycle. While paused, no new patterns are
+        // pushed from the cycle, so manually-pushed Triggered/Gated/error
+        // patterns stay on the panel until the user resumes — makes the
+        // bench eyeball test practical.
+        autocycle_paused = !autocycle_paused;
+        if (autocycle_paused) {
+            Serial.println("autocycle: PAUSED (next 'x' resumes)");
+        } else {
+            // Force the next push by invalidating last-idx state.
+            st_last_idx     = -1;
+            st_last_duty_cycle = 0xFF;
+            Serial.println("autocycle: RESUMED");
+        }
+        return;
+    }
     Serial.print("ERR: unknown cmd '"); Serial.print(c); Serial.println("' (try ?)");
 }
 #endif // STAGE2_SELFTEST
@@ -445,7 +463,8 @@ void loop() {
     int      cur_idx = (t_ms / SELFTEST_PATTERN_DURATION_MS) % SELFTEST_NUM_PATTERNS;
 
     // Log every phase transition so the host can correlate visuals to wall-clock.
-    if (cur_idx != last_logged_idx) {
+    // Suppressed while paused so the serial log stays clean for bench tests.
+    if (!autocycle_paused && cur_idx != last_logged_idx) {
         const char *desc = "?";
         switch (cur_idx) {
             case 0: desc = "all-off Persistent (strict-off test)"; break;
@@ -464,7 +483,15 @@ void loop() {
         last_logged_idx = cur_idx;
     }
 
-    selftest_push_pattern(cur_idx, t_ms);
+    if (!autocycle_paused) {
+        selftest_push_pattern(cur_idx, t_ms);
+    } else if (st_singlepixel_pending) {
+        // While paused, still honor user 'p' commands.
+        st_singlepixel_pending = false;
+        if (!queue_try_add(&display_queue, &st_singlepixel)) {
+            Serial.println("WARN: queue full on singlepixel push");
+        }
+    }
     selftest_handle_serial();
     // idx 5 needs ~500 Hz outer rate to drive Oneshot bright enough to see;
     // other phases idle at 50 Hz to leave CPU room.
