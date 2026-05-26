@@ -8,12 +8,14 @@
 #include "bcm.h"
 #include "layout.h"
 #include "display_pio.h"
+#include "predef_patterns.h"
 
 queue_t display_queue;
+queue_t error_request_queue;   // uint32_t slot indices, core 0 -> core 1
 
 // Core 0
 // -----------------------------------------------------------------------
-Messenger messenger(display_queue);
+Messenger messenger(display_queue, error_request_queue);
 
 #if STAGE2_SELFTEST
 // =======================================================================
@@ -54,6 +56,9 @@ static void selftest_banner() {
     Serial.print  ("  base_T = "); Serial.print(bcm_base_on_us, 2);
     Serial.println(" us (runtime-tunable: \"b<float>\\n\")");
     Serial.println("  Commands: b<float>=set base_T, r<int>=set scan period (us), p<lr>,<lc>=single pixel,");
+    Serial.println("            e<slot>=raise error glyph (slot 0=ERR, 1-5=PE01-05, 100=CE00),");
+    Serial.println("            T=push Triggered all-on Gray_2 (drive GP45 with edges),");
+    Serial.println("            g=push Gated checkerboard (drive GP45 level),");
     Serial.println("            t=timing benchmark, i=banner, ?=help");
     Serial.println("======================================================");
 }
@@ -63,6 +68,9 @@ static void selftest_help() {
     Serial.println("  b<float>     set bcm_base_on_us (e.g. b2.5)");
     Serial.println("  r<int>       set target scan period in us (100..10000; default 1000 = 1 kHz)");
     Serial.println("  p<lr>,<lc>   light single layout pixel at (lr,lc), Gray_2 duty_cycle=255");
+    Serial.println("  e<slot>      raise an error glyph (e.g., e0=ERR, e1=PE01, e100=CE00)");
+    Serial.println("  T            push Triggered all-on Gray_2 pattern (V1 0x12) — drives one row per EINT rising edge on GP45");
+    Serial.println("  g            push Gated checkerboard pattern (V1 0x13) — refreshes only while GP45 is HIGH");
     Serial.println("  t            scan-period timing benchmark across duty_cycle values");
     Serial.println("  i            re-print the boot banner");
     Serial.println("  ?            this help");
@@ -330,6 +338,60 @@ static void selftest_handle_serial() {
         Serial.print("base_T = "); Serial.print(bcm_base_on_us, 3); Serial.println(" us");
         return;
     }
+    if (c == 'e') {
+        // Enqueue an error-glyph raise. This bypasses Messenger (which
+        // wouldn't be running in selftest) and pushes directly into the
+        // error_request_queue. Useful for visual validation of the error
+        // path independent of SPI traffic.
+        long v = line.substring(1).toInt();
+        if (v < 0 || v > 65535) {
+            Serial.print("ERR: slot out of range (got "); Serial.print(v);
+            Serial.println(", expected 0..65535)");
+            return;
+        }
+        uint32_t slot = (uint32_t)v;
+        if (!queue_try_add(&error_request_queue, &slot)) {
+            Serial.println("ERR: error_request_queue full");
+            return;
+        }
+        Serial.print("raise_error(slot=");
+        Serial.print(slot);
+        Serial.println(") queued");
+        return;
+    }
+    if (c == 'T') {
+        // V1 Triggered (cmd 0x12) selftest: push an all-on Gray_2 pattern
+        // tagged DisplayMode::Triggered. Drive GP45 with a function gen
+        // (1-1000 Hz square wave) to advance rows; 20 rising edges = one
+        // visible frame; then dark until another T.
+        Pattern p;
+        build_allon_gray2(p, 255, DisplayMode::Triggered);
+        if (!queue_try_add(&display_queue, &p)) {
+            Serial.println("ERR: display_queue full");
+            return;
+        }
+        // Invalidate the cycle's last-pushed idx so the cycle re-pushes
+        // its own pattern on the next iteration once Triggered completes.
+        st_last_idx     = -1;
+        st_last_duty_cycle = 0xFF;
+        Serial.println("Triggered all-on Gray_2 queued; drive GP45 rising edges to advance rows (20 = 1 frame)");
+        return;
+    }
+    if (c == 'g') {
+        // V1 Gated (cmd 0x13) selftest: push a checkerboard Gray_2 pattern
+        // tagged DisplayMode::Gated. Drive GP45 HIGH to enable display,
+        // LOW to mask off. Persists until the next pattern arrives.
+        Pattern p;
+        build_checkerboard(p, 192, DisplayMode::Gated);
+        if (!queue_try_add(&display_queue, &p)) {
+            Serial.println("ERR: display_queue full");
+            return;
+        }
+        st_last_idx     = -1;
+        st_last_duty_cycle = 0xFF;
+        Serial.println("Gated checkerboard queued; LEDs visible only while GP45 is HIGH");
+        return;
+    }
     if (c == 'p') {
         // Parse "p<lr>,<lc>"
         int comma = line.indexOf(',');
@@ -359,6 +421,11 @@ static void selftest_handle_serial() {
 void setup() {
     Serial.begin(BAUDRATE);
     queue_init(&display_queue, sizeof(Pattern), DISPLAY_QUEUE_SIZE);
+    queue_init(&error_request_queue, sizeof(uint32_t), ERROR_REQUEST_QUEUE_SIZE);
+    // Validate the INCBIN'd predefined-pattern blob. Logs to serial on
+    // failure but never blocks boot — the error-display path falls back to
+    // the compiled-in glyph in that case.
+    predef::init();
 #if STAGE2_SELFTEST
     // Wait briefly for USB CDC to enumerate, then print banner. Selftest does
     // not initialize the SPI peripheral — messenger.initialize() is skipped.
@@ -411,7 +478,7 @@ void loop() {
 // Core 1
 // -----------------------------------------------------------------------
 bool core1_separate_stack = true;
-Display display(display_queue);
+Display display(display_queue, error_request_queue);
 
 void setup1() {
     // S2.3: Stage 2 BCM display engine init.

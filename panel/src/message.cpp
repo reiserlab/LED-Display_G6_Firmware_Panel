@@ -144,9 +144,29 @@ void Message::to_pattern(Pattern &pat, bool &err) {
                 pat.set_mode(DisplayMode::Persistent);
                 break;
 
+            case CMD_ID_DISPLAY_GRAY_2_TRIGGERED:
+                to_pattern_gray_2(pat);   // same payload shape as 0x10
+                pat.set_mode(DisplayMode::Triggered);
+                break;
+
+            case CMD_ID_DISPLAY_GRAY_2_GATED:
+                to_pattern_gray_2(pat);   // same payload shape as 0x10
+                pat.set_mode(DisplayMode::Gated);
+                break;
+
             case CMD_ID_DISPLAY_GRAY_16_PERSIST:
                 to_pattern_gray_16(pat);  // same payload shape as 0x30
                 pat.set_mode(DisplayMode::Persistent);
+                break;
+
+            case CMD_ID_DISPLAY_GRAY_16_TRIGGERED:
+                to_pattern_gray_16(pat);  // same payload shape as 0x30
+                pat.set_mode(DisplayMode::Triggered);
+                break;
+
+            case CMD_ID_DISPLAY_GRAY_16_GATED:
+                to_pattern_gray_16(pat);  // same payload shape as 0x30
+                pat.set_mode(DisplayMode::Gated);
                 break;
 
             default:
@@ -339,10 +359,13 @@ void Message::from_pattern_gray_16(Pattern &pat, uint8_t protocol) {
 
 
 void Message::to_pattern_gray_2(Pattern &pat) {
-    // Accept V1 Oneshot (0x10) and V1 Persistent (0x11) — both share the
-    // 50 B + duty_cycle payload shape. Mode is set by the caller (to_pattern()).
+    // Accept all four V1 Gray_2 cmds (0x10/0x11/0x12/0x13) — same 50 B +
+    // duty_cycle payload shape; mode is set by the caller (to_pattern()).
     uint8_t cmd = command_byte();
-    if (cmd != CMD_ID_DISPLAY_GRAY_2 && cmd != CMD_ID_DISPLAY_GRAY_2_PERSIST) {
+    if (cmd != CMD_ID_DISPLAY_GRAY_2 &&
+        cmd != CMD_ID_DISPLAY_GRAY_2_PERSIST &&
+        cmd != CMD_ID_DISPLAY_GRAY_2_TRIGGERED &&
+        cmd != CMD_ID_DISPLAY_GRAY_2_GATED) {
         return;
     }
     pat.set_gray_level(GrayLevel::Gray_2);
@@ -362,10 +385,13 @@ void Message::to_pattern_gray_2(Pattern &pat) {
 
 
 void Message::to_pattern_gray_16(Pattern &pat) {
-    // Accept V1 Oneshot (0x30) and V1 Persistent (0x31) — same 200 B +
+    // Accept all four V1 Gray_16 cmds (0x30/0x31/0x32/0x33) — same 200 B +
     // duty_cycle payload shape; mode is set by to_pattern().
     uint8_t cmd = command_byte();
-    if (cmd != CMD_ID_DISPLAY_GRAY_16 && cmd != CMD_ID_DISPLAY_GRAY_16_PERSIST) {
+    if (cmd != CMD_ID_DISPLAY_GRAY_16 &&
+        cmd != CMD_ID_DISPLAY_GRAY_16_PERSIST &&
+        cmd != CMD_ID_DISPLAY_GRAY_16_TRIGGERED &&
+        cmd != CMD_ID_DISPLAY_GRAY_16_GATED) {
         return;
     }
     pat.set_gray_level(GrayLevel::Gray_16);

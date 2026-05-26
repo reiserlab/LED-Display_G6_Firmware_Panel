@@ -42,5 +42,21 @@ constexpr bool ROW_ON_LEVEL = false;  // row LOW = ON
 extern const size_t DISPLAY_QUEUE_SIZE;
 extern const uint8_t NUM_COLOR;
 
+// Error-display timing (V1 panel error glyphs).
+//   Duration: how long the panel shows an error glyph in Persistent mode.
+//   Rate-limit: minimum elapsed wall-clock between successive raises; errors
+//   inside this window are silently counted (heartbeat) but not displayed,
+//   so a noisy bus doesn't starve the panel of valid commands.
+// Plan: 1 s display, 5 s rate-limit. Spec minimum is 500 ms per
+// g6_01-panel-protocol.md:394.
+extern const uint32_t ERROR_DISPLAY_DURATION_US;
+extern const uint32_t ERROR_RATE_LIMIT_US;
+
+// Cross-core error-request queue depth. Messenger (core 0) enqueues a
+// pending error slot index; Display (core 1) drains. A small fixed depth is
+// fine because the rate-limit guarantees fewer than ~1 enqueue per error-
+// display window.
+extern const size_t ERROR_REQUEST_QUEUE_SIZE;
+
 
 #endif

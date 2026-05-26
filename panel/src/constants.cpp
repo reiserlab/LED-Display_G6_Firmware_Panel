@@ -47,3 +47,8 @@ const uint8_t ROW_PIN[PANEL_SIZE] =
 // Display parameters
 const size_t DISPLAY_QUEUE_SIZE = 5;
 const uint8_t NUM_COLOR = 4;
+
+// Error-display timing
+const uint32_t ERROR_DISPLAY_DURATION_US = 1'000'000;   // 1 s display window
+const uint32_t ERROR_RATE_LIMIT_US       = 5'000'000;   // 5 s minimum between displays
+const size_t ERROR_REQUEST_QUEUE_SIZE    = 4;

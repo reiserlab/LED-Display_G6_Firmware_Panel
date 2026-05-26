@@ -28,16 +28,22 @@ enum CommandId: uint8_t {
     CMD_ID_COMMS_CHECK              = 0x01,
 
     // 2-Level (1bpp) display, 50 B pixel + 1 B duty_cycle payload
-    CMD_ID_DISPLAY_GRAY_2           = 0x10,   // Oneshot     — single scan, then idle
-    CMD_ID_DISPLAY_GRAY_2_PERSIST   = 0x11,   // Persistent  — continuous refresh until next cmd
-    // 0x12 — V1 Triggered  (2L)  (specced; not implementing now)
-    // 0x13 — V1 Gated      (2L)  (specced; not implementing now)
+    CMD_ID_DISPLAY_GRAY_2             = 0x10,   // Oneshot     — single scan, then idle
+    CMD_ID_DISPLAY_GRAY_2_PERSIST     = 0x11,   // Persistent  — continuous refresh until next cmd
+    CMD_ID_DISPLAY_GRAY_2_TRIGGERED   = 0x12,   // Triggered   — one row per EINT edge, 20 edges = 1 frame
+    CMD_ID_DISPLAY_GRAY_2_GATED       = 0x13,   // Gated       — EINT level masks LED output
 
     // 16-Level (4bpp) display, 200 B pixel + 1 B duty_cycle payload
-    CMD_ID_DISPLAY_GRAY_16          = 0x30,   // Oneshot
-    CMD_ID_DISPLAY_GRAY_16_PERSIST  = 0x31,   // Persistent
-    // 0x32 — V1 Triggered  (16L) (specced; not implementing now)
-    // 0x33 — V1 Gated      (16L) (specced; not implementing now)
+    CMD_ID_DISPLAY_GRAY_16            = 0x30,   // Oneshot
+    CMD_ID_DISPLAY_GRAY_16_PERSIST    = 0x31,   // Persistent
+    CMD_ID_DISPLAY_GRAY_16_TRIGGERED  = 0x32,   // Triggered
+    CMD_ID_DISPLAY_GRAY_16_GATED      = 0x33,   // Gated
+
+    // V1 panel-error display: panel renders a predefined error-glyph pattern
+    // from the firmware-baked flash blob. Payload is a 24-bit LE slot index
+    // (shape compatible with V3 0x70 to preserve the option). V1 firmware
+    // reads the low byte and raises PE05 if upper two bytes are nonzero.
+    CMD_ID_ERROR_DISPLAY            = 0xC2,
 
     // ---- V2 reservations (specced; header 0x02/0x82) — PSRAM-backed display ----
     //   0x0F                 — Reset PSRAM
@@ -68,6 +74,7 @@ extern const size_t PAYLOAD_MINIMUM_SIZE;
 extern const size_t PAYLOAD_COMMS_CHECK;
 extern const size_t PAYLOAD_DISPLAY_GRAY_2;
 extern const size_t PAYLOAD_DISPLAY_GRAY_16;
+extern const size_t PAYLOAD_ERROR_DISPLAY;   // 3 B: 24-bit LE slot index (V3 0x70-compatible)
 extern const size_t MESSAGE_MINIMUM_SIZE;
 
 using PayloadSizeUMap = std::unordered_map<uint8_t, size_t>;
@@ -85,15 +92,20 @@ enum class GrayLevel {
 using GrayLevelUMap = std::unordered_map<GrayLevel, uint8_t>;
 extern const GrayLevelUMap GRAY_LEVEL_UMAP;
 
-// Display mode — V1 implements Oneshot + Persistent.
-//   0x10 / 0x30 → Oneshot   (single scan, then idle)
-//   0x11 / 0x31 → Persistent (scan continuously until next command)
-// Triggered (0x12 / 0x32) + Gated (0x13 / 0x33) are V2 reservations.
+// V1 display modes. Per g6_01-panel-protocol.md § Display Mode Summary:
+//   0x10 / 0x30 → Oneshot    — single scan, then idle (dark)
+//   0x11 / 0x31 → Persistent — continuous refresh until next command
+//   0x12 / 0x32 → Triggered  — one row × all bit-planes per EINT rising edge;
+//                              20 edges = 1 frame; mid-consumption overwrite
+//                              resets the row counter
+//   0x13 / 0x33 → Gated      — Oneshot-style pattern processing; EINT level
+//                              acts as a global LED output-enable mask
+//                              (HIGH = visible, LOW = dark)
 enum class DisplayMode : uint8_t {
     Oneshot    = 0,
     Persistent = 1,
-    // Triggered = 2,  // V2 reservation; not implemented
-    // Gated     = 3,  // V2 reservation; not implemented
+    Triggered  = 2,
+    Gated      = 3,
 };
 
 #endif
