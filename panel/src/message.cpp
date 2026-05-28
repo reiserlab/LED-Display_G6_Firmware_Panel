@@ -44,7 +44,7 @@ uint8_t Message::parity_bit() {
 
 void Message::set_parity_bit() {
     uint8_t parity = calculate_parity_bit();
-    bitWrite(data_.at(0), 7, parity); 
+    bitWrite(data_.at(0), 7, parity);
 }
 
 
@@ -54,7 +54,7 @@ bool Message::check_parity() {
 
 
 bool Message::check_length() {
-    bool ok = num_bytes_ >= MESSAGE_MINIMUM_SIZE; 
+    bool ok = num_bytes_ >= MESSAGE_MINIMUM_SIZE;
     uint8_t cmd = command_byte();
     if (PAYLOAD_SIZE_UMAP.find(cmd) != PAYLOAD_SIZE_UMAP.end()) {
         size_t payload_size = PAYLOAD_SIZE_UMAP.at(cmd);
@@ -87,9 +87,10 @@ uint8_t Message::header_with_parity_for_3byte(
 {
     uint8_t v = version_byte_no_parity & 0b01111111;
     uint32_t count = 0;
-    count += std::bitset<sizeof(uint8_t)>(v).count();
-    count += std::bitset<sizeof(uint8_t)>(cmd).count();
-    count += std::bitset<sizeof(uint8_t)>(checksum).count();
+    // CHAR_BIT * sizeof(uint8_t) = 8 bits; sizeof() alone is 1 byte = LSB only.
+    count += std::bitset<CHAR_BIT * sizeof(uint8_t)>(v).count();
+    count += std::bitset<CHAR_BIT * sizeof(uint8_t)>(cmd).count();
+    count += std::bitset<CHAR_BIT * sizeof(uint8_t)>(checksum).count();
     uint8_t parity = count & 1;
     return v | (parity << 7);
 }
@@ -219,9 +220,9 @@ uint8_t Message::calculate_parity_bit() {
         uint8_t byte = data_.at(i);
         if (i==0) {
             // Mask parity bit
-            byte &= 0b01111111; 
+            byte &= 0b01111111;
         }
-        sum += std::bitset<sizeof(uint8_t)>(byte).count();
+        sum += std::bitset<CHAR_BIT * sizeof(uint8_t)>(byte).count();
     }
     return sum % 2;
 }
@@ -414,4 +415,3 @@ void Message::to_pattern_gray_16(Pattern &pat) {
     // Set duty_cycle to last payload value
     pat.set_duty_cycle(data_.at(num_bytes_-1));
 }
-
