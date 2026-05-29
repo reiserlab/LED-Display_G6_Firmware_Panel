@@ -96,7 +96,7 @@ void Messenger::initialize() {
     spi_set_format(SPI_INST, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
 
     // S1.3: prime the CIPO confirmation buffer + TX FIFO with the empty-buffer
-    // sentinel BEFORE the first CS falling edge from a master.
+    // sentinel BEFORE the first CS falling edge from the controller.
     panel_spi_clear_confirmation();
 }
 
@@ -106,7 +106,7 @@ void Messenger::update() {
 
 #if SPI_DIAG
     // Wall-clock gap between consecutive update() entries: detects when
-    // post-receive processing spills past the master's inter-frame window.
+    // post-receive processing spills past the controller's inter-frame window.
     static uint64_t t_last_enter = 0;
     static uint32_t gap_bins[6] = {0};   // <1, <2, <4, <8, <16, >=16 ms
     static uint32_t gap_max_us  = 0;

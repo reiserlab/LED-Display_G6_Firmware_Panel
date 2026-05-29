@@ -9,12 +9,12 @@
 #
 # Target board is identified by USB serial number, not /dev/ttyACM* (which
 # shifts with enumeration order). Match criteria:
-#   VID:PID         2e8a:0009   (Raspberry Pi VID, slave-firmware USB-serial PID)
+#   VID:PID         2e8a:0009   (Raspberry Pi VID, panel-firmware USB-serial PID)
 #   USB product     "RP2354 20x20 Display Panel"   (set in panel/platformio.ini)
 #   serial number   passed as argv[1]
 #
 # A board in BOOTSEL mode (PID 0x000f) does not expose this serial, so this
-# script only matches panels currently running the slave firmware. If the
+# script only matches panels currently running the panel firmware. If the
 # panel is stuck in BOOTSEL, flash it manually with `pio run -d panel -e
 # <env> -t upload`.
 

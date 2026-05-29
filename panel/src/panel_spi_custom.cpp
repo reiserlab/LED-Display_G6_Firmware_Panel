@@ -7,7 +7,7 @@
 #include "panel_spi_custom.h"
 
 // ----------------------------------------------------------------------------
-// DMA-paced SPI-slave RX/TX.
+// DMA-paced SPI peripheral RX/TX.
 //
 // Two DMA channels driven off the SPI DREQs move bytes in hardware, so
 // reception is immune to core-0 processing latency within a burst (the polled
@@ -153,8 +153,8 @@ void panel_spi_read(Message &msg) {
 
     msg.num_bytes_ = received;
 
-    // Clear the armed confirmation only once the master clocked a full 3-byte
-    // CIPO slot; fragmented transactions leave it armed (per spec).
+    // Clear the armed confirmation only once the controller clocked a full
+    // 3-byte CIPO slot; fragmented transactions leave it armed (per spec).
     if (msg.num_bytes_ >= 3) {
         panel_spi_clear_confirmation();
     }
