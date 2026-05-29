@@ -1,0 +1,15 @@
+[workspace]
+authors = ["Frank Loesche <loeschef@janelia.hhmi.org>"]
+channels = ["conda-forge"]
+name = "Panel-Firmware"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+deploy21a    = "bash panel/tools/deploy.sh 319A5199EE357F77 pico_v021"
+deploy31a  = "bash panel/tools/deploy.sh A5D4B82BA2B9FB51 pico_v031"
+monitor21a   = "bash panel/tools/monitor.sh 319A5199EE357F77"
+monitor31a = "bash panel/tools/monitor.sh A5D4B82BA2B9FB51"
+
+[dependencies]
+platformio = ">=6.1.19,<7"

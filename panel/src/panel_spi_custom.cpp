@@ -120,8 +120,21 @@ static int __not_in_flash_func(custom_spi_read_blocking)(
             --rx_remaining;
             num_rx++;
         }
-        // Check if master de-asserted CS (transaction ended)
+        // Check if master de-asserted CS (transaction ended).
+        //
+        // PATCH (G6-ArenaSlim PE03 hunt): drain any bytes still in the RX
+        // FIFO before exiting. If the polling loop entered LATE (panel was
+        // busy in housekeeping / an IRQ when the master started clocking),
+        // the FIFO may hold up to 8 captured bytes that this loop never got
+        // to read in its main body. Without this drain, the loop exits on
+        // the first CS-HIGH check with num_rx as low as 1 even though the
+        // FIFO has more recoverable bytes.
         if (gpio_get(cs_pin)) {
+            while (rx_remaining && spi_is_readable(spi)) {
+                *dst++ = (uint8_t) spi_get_hw(spi)->dr;
+                --rx_remaining;
+                num_rx++;
+            }
             break;
         }
     }

@@ -18,3 +18,6 @@ panel/tools/__pycache__/
 panel/src/predef_patterns.bin
 panel/src/predef_patterns_blob.h
 panel/src/predef_patterns_table.h
+# pixi environments
+.pixi/*
+!.pixi/config.toml

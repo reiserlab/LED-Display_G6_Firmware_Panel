@@ -12,6 +12,14 @@
 // S2.2: Display lives in main.cpp; we read frames_skipped_ for the heartbeat.
 extern Display display;
 
+// PATCH (G6-ArenaSlim PE03 hunt): capture the first PE03-triggering message
+// of each diagnostic window. Written by the validity gate in update(),
+// drained by the per-1000-msg diagnostic block. Buffer is sized to the
+// largest possible message so we can dump the full received payload.
+static uint8_t  g_pe03_data[MESSAGE_MAXIMUM_SIZE] = {0};
+static uint32_t g_pe03_num_bytes = 0;
+static bool     g_pe03_dirty = false;
+
 
 Messenger::Messenger(queue_t &display_queue, queue_t &error_request_queue)
     : display_queue_(display_queue),
@@ -99,7 +107,56 @@ void Messenger::initialize() {
 void Messenger::update() {
 
     static Message msg;
+
+    // PATCH (G6-ArenaSlim PE03 hunt, timing probe):
+    // Bucket the wall-clock gap between consecutive update() entries so we
+    // can tell whether post-receive processing is spilling past the master's
+    // inter-transaction window (~3.13 ms at 300 Hz GS16). If most gaps land
+    // in the 4-8 ms bin, every other transaction is being missed and the
+    // FIFO-overflow signature (num_bytes=8) follows naturally.
+    static uint64_t t_last_enter = 0;
+    static uint32_t gap_bins[6] = {0};   // <1, <2, <4, <8, <16, >=16 ms
+    static uint32_t gap_max_us  = 0;
+    uint64_t t_enter = time_us_64();
+    if (t_last_enter != 0) {
+        uint32_t gap_us = (uint32_t)(t_enter - t_last_enter);
+        if      (gap_us <  1000) gap_bins[0]++;
+        else if (gap_us <  2000) gap_bins[1]++;
+        else if (gap_us <  4000) gap_bins[2]++;
+        else if (gap_us <  8000) gap_bins[3]++;
+        else if (gap_us < 16000) gap_bins[4]++;
+        else                     gap_bins[5]++;
+        if (gap_us > gap_max_us) gap_max_us = gap_us;
+    }
+    t_last_enter = t_enter;
+
+    // Time spent inside panel_spi_read — the wait-for-CS↓ spin plus the
+    // actual byte read. Captured separately for each branch of last_num_bytes
+    // (n==203 success vs n==8 FIFO-overflow) so we can tell which one is
+    // taking the long time.
+    uint64_t t_spi_start = time_us_64();
     panel_spi_read(msg);
+    uint64_t t_spi_end   = time_us_64();
+    static uint32_t spi_bins_n203[6] = {0};
+    static uint32_t spi_bins_n8  [6] = {0};
+    static uint32_t spi_bins_oth [6] = {0};
+    {
+        uint32_t spi_us = (uint32_t)(t_spi_end - t_spi_start);
+        uint32_t *bins = (msg.num_bytes() == 203) ? spi_bins_n203
+                       : (msg.num_bytes() ==   8) ? spi_bins_n8
+                                                  : spi_bins_oth;
+        if      (spi_us <  1000) bins[0]++;
+        else if (spi_us <  2000) bins[1]++;
+        else if (spi_us <  4000) bins[2]++;
+        else if (spi_us <  8000) bins[3]++;
+        else if (spi_us < 16000) bins[4]++;
+        else                     bins[5]++;
+    }
+
+    // Wall-clock time of just the post-receive processing — from here to
+    // the bottom of update(). Isolates dispatch/queue/crc cost from the
+    // panel_spi_read wait-for-CS↓ time captured in the gap histogram.
+    uint64_t t_post_recv_start = time_us_64();
     msg_count_ += 1;
 
     // S1.4: reset COMM_CHECK byte-validation flag at the start of every
@@ -132,6 +189,17 @@ void Messenger::update() {
         if (!parity_ok) {
             raise_error(PREDEF_SLOT_PE02);
         } else if (!length_ok) {
+            // PATCH (G6-ArenaSlim PE03 hunt): capture the first PE03-triggering
+            // message of each diagnostic window into the file-scope buffers
+            // (declared just below the includes). Cleared after print.
+            if (!g_pe03_dirty) {
+                g_pe03_dirty = true;
+                g_pe03_num_bytes = (uint32_t)msg.num_bytes();
+                const uint8_t *src = msg.data_ptr();
+                size_t cap = sizeof(g_pe03_data);
+                size_t n = msg.num_bytes() < cap ? msg.num_bytes() : cap;
+                for (size_t i = 0; i < n; i++) g_pe03_data[i] = src[i];
+            }
             raise_error(PREDEF_SLOT_PE03);
         } else if (!protocol_ok) {
             raise_error(PREDEF_SLOT_PE04);
@@ -164,21 +232,83 @@ void Messenger::update() {
     // else: buffer stays as the previous valid confirmation OR the empty
     // sentinel (already loaded into the TX FIFO between transactions).
 
+    // Bucket the post-receive processing time the same way as the gap.
+    static uint32_t proc_bins[6] = {0};
+    static uint32_t proc_max_us  = 0;
+    {
+        uint32_t proc_us = (uint32_t)(time_us_64() - t_post_recv_start);
+        if      (proc_us <  1000) proc_bins[0]++;
+        else if (proc_us <  2000) proc_bins[1]++;
+        else if (proc_us <  4000) proc_bins[2]++;
+        else if (proc_us <  8000) proc_bins[3]++;
+        else if (proc_us < 16000) proc_bins[4]++;
+        else                      proc_bins[5]++;
+        if (proc_us > proc_max_us) proc_max_us = proc_us;
+    }
+
+    // PATCH (G6-ArenaSlim PE03 hunt, timing probe):
+    // Single-line histograms every 1000 messages. Kept terse so the
+    // Serial.write itself doesn't dominate the stall we're trying to measure.
+    // Bins are cumulative across the run; read deltas between prints.
+    if (msg_count_ % 1000 == 0) {
+        Serial.print("gap_us [<1k <2k <4k <8k <16k >=16k]: ");
+        for (int i = 0; i < 6; i++) { Serial.print(gap_bins[i]);  Serial.print(' '); }
+        Serial.print(" max="); Serial.println(gap_max_us);
+
+        Serial.print("proc_us[<1k <2k <4k <8k <16k >=16k]: ");
+        for (int i = 0; i < 6; i++) { Serial.print(proc_bins[i]); Serial.print(' '); }
+        Serial.print(" max="); Serial.println(proc_max_us);
+
+        Serial.print("spi_us n=203 ");
+        for (int i = 0; i < 6; i++) { Serial.print(spi_bins_n203[i]); Serial.print(' '); }
+        Serial.println();
+        Serial.print("spi_us n=  8 ");
+        for (int i = 0; i < 6; i++) { Serial.print(spi_bins_n8[i]); Serial.print(' '); }
+        Serial.println();
+        Serial.print("spi_us n=oth ");
+        for (int i = 0; i < 6; i++) { Serial.print(spi_bins_oth[i]); Serial.print(' '); }
+        Serial.print(" last_n=");
+        Serial.println(msg.num_bytes());
+    }
+
     // DEVEL serial heartbeat
     // -----------------------------------------------------------
-    if (msg_count_ % 1000 == 0) {
-        Serial << "msg_count:        " << msg_count_  << endl;
-        Serial << "parity_ok:        " << parity_ok   << endl;
-        Serial << "length_ok:        " << length_ok   << endl;
-        Serial << "protocol_ok:      " << protocol_ok << endl;
-        Serial << "cmd_ok:           " << cmd_ok      << endl;
-        Serial << "comm_check_ok:    " << comm_check_ok_ << endl;
-        Serial << "queue_drops:      " << queue_drops_   << endl;
-        Serial << "frames_skipped:   " << display.frames_skipped() << endl;
-        Serial << "err_displayed:    " << error_displayed_count_ << endl;
-        Serial << "err_suppressed:   " << error_suppressed_count_ << endl;
-        Serial << endl;
-    }
+    // if (msg_count_ % 1000 == 0) {
+    //     Serial << "msg_count:        " << msg_count_  << endl;
+    //     Serial << "parity_ok:        " << parity_ok   << endl;
+    //     Serial << "length_ok:        " << length_ok   << endl;
+    //     Serial << "protocol_ok:      " << protocol_ok << endl;
+    //     Serial << "cmd_ok:           " << cmd_ok      << endl;
+    //     Serial << "comm_check_ok:    " << comm_check_ok_ << endl;
+    //     Serial << "queue_drops:      " << queue_drops_   << endl;
+    //     Serial << "frames_skipped:   " << display.frames_skipped() << endl;
+    //     Serial << "err_displayed:    " << error_displayed_count_ << endl;
+    //     Serial << "err_suppressed:   " << error_suppressed_count_ << endl;
+    //     if (g_pe03_dirty) {
+    //         // Dump the first PE03-rejected message of this window, full
+    //         // payload in 16-byte hex rows. Note: this print blocks core 0
+    //         // for many ms (USB CDC), so a few subsequent transactions may
+    //         // be missed; that's an acceptable trade in diagnostic mode.
+    //         size_t cap = sizeof(g_pe03_data);
+    //         size_t n = g_pe03_num_bytes < cap ? g_pe03_num_bytes : cap;
+    //         Serial << "pe03_first:       num_bytes=" << g_pe03_num_bytes << endl;
+    //         for (size_t i = 0; i < n; i += 16) {
+    //             Serial << "  ";
+    //             if (i < 0x10)   Serial << "000";
+    //             else if (i < 0x100) Serial << "00";
+    //             else                Serial << "0";
+    //             Serial << _HEX(i) << ": ";
+    //             size_t row_end = (i + 16 < n) ? i + 16 : n;
+    //             for (size_t j = i; j < row_end; j++) {
+    //                 if (g_pe03_data[j] < 0x10) Serial << "0";
+    //                 Serial << _HEX(g_pe03_data[j]) << " ";
+    //             }
+    //             Serial << endl;
+    //         }
+    //         g_pe03_dirty = false;
+    //     }
+    //     Serial << endl;
+    // }
     // -----------------------------------------------------------
 }
 
@@ -246,7 +376,7 @@ void Messenger::on_cmd_error_display(Message &msg) {
     // Shape matches V3 0x70 to preserve the option. V1 firmware reads only
     // the low byte (0..255 slots cover the V1 catalog with margin); if the
     // upper two bytes are nonzero, raise PE05 (invalid pattern index) and
-    // refuse to display the requested glyph — defensive against host bugs.
+    // refuse to display the requested glyph — defensive against hostpages/Reiser/Funnel.html bugs.
     uint8_t lo  = msg.payload_at(0);
     uint8_t mid = msg.payload_at(1);
     uint8_t hi  = msg.payload_at(2);
@@ -266,29 +396,29 @@ void Messenger::on_cmd_error_display(Message &msg) {
 //pat.set_gray_level(GrayLevel::Gray_2);
 //pat.set_duty_cycle(255);
 //
-//pat.matrix() << 
-//    1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0; 
+//pat.matrix() <<
+//    1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0;
 //
-//Message msg; 
+//Message msg;
 //msg.from_pattern(pat);
 //
 //Serial << endl;
@@ -308,8 +438,3 @@ void Messenger::on_cmd_error_display(Message &msg) {
 //    Serial << endl;
 //}
 //Serial << endl;
-
-
-
-
-
