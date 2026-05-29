@@ -8,6 +8,7 @@
 #include "predef_patterns_table.h"
 #include "display.h"
 #include <Streaming.h>
+#include <cstdio>
 
 // S2.2: Display lives in main.cpp; we read frames_skipped_ for the heartbeat.
 extern Display display;
@@ -164,20 +165,31 @@ void Messenger::update() {
     // else: buffer stays as the previous valid confirmation OR the empty
     // sentinel (already loaded into the TX FIFO between transactions).
 
-    // DEVEL serial heartbeat
+    // DEVEL serial heartbeat — NON-BLOCKING.
     // -----------------------------------------------------------
+    // Emitted once per 1000 messages, but only when the USB-CDC TX FIFO has
+    // room for the whole line. The old version did 11 blocking `Serial <<`
+    // writes (~280 B); at 115200 baud a full host-side buffer could stall
+    // core 0 for milliseconds *between* SPI transactions, so the panel wasn't
+    // back in custom_spi_read_blocking() when the master started the next
+    // transaction -> missed leading bytes -> num_rx undercount -> PE03. The
+    // heartbeat is diagnostic and safely droppable: build one compact line and
+    // skip it entirely if there isn't guaranteed room (so write() never blocks).
     if (msg_count_ % 1000 == 0) {
-        Serial << "msg_count:        " << msg_count_  << endl;
-        Serial << "parity_ok:        " << parity_ok   << endl;
-        Serial << "length_ok:        " << length_ok   << endl;
-        Serial << "protocol_ok:      " << protocol_ok << endl;
-        Serial << "cmd_ok:           " << cmd_ok      << endl;
-        Serial << "comm_check_ok:    " << comm_check_ok_ << endl;
-        Serial << "queue_drops:      " << queue_drops_   << endl;
-        Serial << "frames_skipped:   " << display.frames_skipped() << endl;
-        Serial << "err_displayed:    " << error_displayed_count_ << endl;
-        Serial << "err_suppressed:   " << error_suppressed_count_ << endl;
-        Serial << endl;
+        char hb[192];
+        int n = snprintf(hb, sizeof(hb),
+            "HB msg=%llu par=%d len=%d proto=%d cmd=%d cc=%d "
+            "qdrop=%llu fskip=%llu errd=%llu errs=%llu\r\n",
+            (unsigned long long)msg_count_,
+            (int)parity_ok, (int)length_ok, (int)protocol_ok, (int)cmd_ok,
+            (int)comm_check_ok_,
+            (unsigned long long)queue_drops_,
+            (unsigned long long)display.frames_skipped(),
+            (unsigned long long)error_displayed_count_,
+            (unsigned long long)error_suppressed_count_);
+        if (n > 0 && n < (int)sizeof(hb) && Serial.availableForWrite() >= n) {
+            Serial.write(reinterpret_cast<const uint8_t *>(hb), (size_t)n);
+        }
     }
     // -----------------------------------------------------------
 }
