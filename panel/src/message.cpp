@@ -1,5 +1,6 @@
 #include <bitset>
 #include <algorithm>
+#include <climits>
 #include "message.h"
 
 #include <Streaming.h>
@@ -87,9 +88,9 @@ uint8_t Message::header_with_parity_for_3byte(
 {
     uint8_t v = version_byte_no_parity & 0b01111111;
     uint32_t count = 0;
-    count += std::bitset<sizeof(uint8_t)>(v).count();
-    count += std::bitset<sizeof(uint8_t)>(cmd).count();
-    count += std::bitset<sizeof(uint8_t)>(checksum).count();
+    count += std::bitset<CHAR_BIT * sizeof(uint8_t)>(v).count();
+    count += std::bitset<CHAR_BIT * sizeof(uint8_t)>(cmd).count();
+    count += std::bitset<CHAR_BIT * sizeof(uint8_t)>(checksum).count();
     uint8_t parity = count & 1;
     return v | (parity << 7);
 }
@@ -221,7 +222,7 @@ uint8_t Message::calculate_parity_bit() {
             // Mask parity bit
             byte &= 0b01111111; 
         }
-        sum += std::bitset<sizeof(uint8_t)>(byte).count();
+        sum += std::bitset<CHAR_BIT * sizeof(uint8_t)>(byte).count();
     }
     return sum % 2;
 }

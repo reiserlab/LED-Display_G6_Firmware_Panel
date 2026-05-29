@@ -269,6 +269,55 @@ void Messenger::update() {
         for (int i = 0; i < 6; i++) { Serial.print(spi_bins_oth[i]); Serial.print(' '); }
         Serial.print(" last_n=");
         Serial.println(msg.num_bytes());
+
+        // PATCH (DMA-RX bring-up): where is the last frame landing in the
+        // validity gate, and what are its leading bytes? Tells us whether the
+        // DMA-captured bytes are correctly aligned (hdr should be 0x01/0x81,
+        // cmd a known opcode) and whether it actually dispatched + enqueued.
+        Serial.print("gate p/l/pr/cmd/cc=");
+        Serial.print(parity_ok);   Serial.print('/');
+        Serial.print(length_ok);   Serial.print('/');
+        Serial.print(protocol_ok); Serial.print('/');
+        Serial.print(cmd_ok);      Serial.print('/');
+        Serial.print(comm_check_ok_);
+        Serial.print("  hdr=0x");  Serial.print(msg.header_byte(), HEX);
+        Serial.print(" cmd=0x");   Serial.print(msg.command_byte(), HEX);
+        Serial.print("  b[0..5]=");
+        for (size_t i = 0; i < 6 && i < msg.num_bytes(); i++) {
+            uint8_t b = msg.data_ptr()[i];
+            if (b < 0x10) Serial.print('0');
+            Serial.print(b, HEX); Serial.print(' ');
+        }
+        Serial.print(" qdrop=");   Serial.print(queue_drops_);
+        Serial.print(" fskip=");   Serial.print(display.frames_skipped());
+        Serial.print(" errD/S=");  Serial.print(error_displayed_count_);
+        Serial.print('/');         Serial.println(error_suppressed_count_);
+
+        // PATCH (parity hunt): on a parity miss, show the panel's own computed
+        // parity vs the received bit, the total payload popcount, and exactly
+        // which received bytes differ from the expected all-0xFF "All On"
+        // pattern. An odd number of differing bits is what flips parity.
+        if (!parity_ok) {
+            uint8_t *d = msg.data_ptr();
+            size_t   n = msg.num_bytes();
+            size_t   non_ff = 0, first_bad = SIZE_MAX; uint8_t first_bad_val = 0;
+            for (size_t i = 2; i < n; i++) {            // payload region only
+                if (d[i] != 0xFF) {
+                    if (first_bad == SIZE_MAX) { first_bad = i; first_bad_val = d[i]; }
+                    non_ff++;
+                }
+            }
+            Serial.print("  PARITY calc=");  Serial.print(msg.calculate_parity_bit());
+            Serial.print(" recv_bit=");      Serial.print(msg.parity_bit());
+            Serial.print(" n=");             Serial.print((uint32_t)n);
+            Serial.print(" payload_non0xFF="); Serial.print((uint32_t)non_ff);
+            if (first_bad != SIZE_MAX) {
+                Serial.print(" first_bad@");  Serial.print((uint32_t)first_bad);
+                Serial.print("=0x");          Serial.print(first_bad_val, HEX);
+            }
+            Serial.print(" last@");           Serial.print((uint32_t)(n - 1));
+            Serial.print("=0x");              Serial.println(d[n - 1], HEX);
+        }
     }
 
     // DEVEL serial heartbeat
