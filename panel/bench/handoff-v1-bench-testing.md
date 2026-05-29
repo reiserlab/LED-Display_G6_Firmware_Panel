@@ -5,6 +5,14 @@
 **Goal:** Automated validation of the V1 firmware feature-complete release (error codes + Triggered + Gated)
 **Forward-looking:** This run's automation scripts should be factored into a reusable bench-test skill in a follow-up session.
 
+> **Note (2026-05-29): `panel_master` is retired.** It was a stop-gap that turned a
+> second G6 panel into a ~250 kHz bitbang SPI controller in the absence of a real
+> arena. We now have the actual **arena master**, which is the sole source of
+> protocol-level SPI stimulus going forward (and the only thing that can validate
+> 10–30 MHz). All "arena master" references below were formerly `panel_master`; the
+> bench role is identical, just driven by real hardware. See
+> `handoff-spi-highspeed-bench.md` for the high-speed SPI capture protocol.
+
 ---
 
 ## 1. Context for the next session
@@ -59,7 +67,7 @@ Suggested channel assignment (USER TO CONFIRM PIN-TO-PAD MAPPING — varies by p
 | D0 | EINT (GP45) | Trigger source; sample at ≥1 MS/s for ns-level edge timing |
 | D1 | One row pin (e.g., ROW[0] = GP20 on v0.3.1) | LOW = row ON; gives us "row drive window" timing |
 | D2 | A second row pin (e.g., ROW[10] = GP30) | Lets us verify row sequencing across the panel without moving probes |
-| D3-D6 | SPI MOSI/MISO/SCK/CS (if testing protocol-level Triggered/Gated via panel_master) | Optional |
+| D3-D6 | SPI MOSI/MISO/SCK/CS (if testing protocol-level Triggered/Gated via the arena master) | Optional |
 | A0 | Photodiode amplifier output | LED-on ground truth; see below |
 
 ### Photodiode (the new piece)
@@ -148,7 +156,7 @@ For tests that sweep a parameter (e.g., Triggered at 100 Hz / 1 kHz / 8 kHz / 22
 | 1 | **Firmware boots, predef blob valid** | Power-on + USB | Serial | `predef: ok, 200 slots (1994 B)` printed within 2 s of boot |
 | 2 | **EINT polarity — rising-edge fires** | AD3 single rising pulse (1 ms width, 3.3 V) after `T` | Saleae D0 (EINT) + D1 (row[0]) + A0 (photodiode) | Row LOW + photodiode rise both follow EINT rising edge within 5 µs; no LED transition correlated with EINT falling edge |
 | 3 | **Triggered consumption: 20 edges = 1 frame** | AD3 burst of 20 rising edges at 1 kHz after `T` | Saleae all rows + photodiode | Each edge produces one row drive (row LOW window); 20 edges total; panel dark after edge 21 |
-| 4 | **Triggered at 8 kHz with operational duty_cycle** | Modify `T` cmd to push duty=85 (or panel_master 0x12 at duty=85), AD3 burst at 8 kHz | Saleae | Per-row LED-on window 12-18 µs (~10-15% of 125 µs); no edges missed across 100 bursts |
+| 4 | **Triggered at 8 kHz with operational duty_cycle** | Modify `T` cmd to push duty=85 (or the arena master 0x12 at duty=85), AD3 burst at 8 kHz | Saleae | Per-row LED-on window 12-18 µs (~10-15% of 125 µs); no edges missed across 100 bursts |
 | 5 | **All glyphs render** | `e 0; e 1; e 2; e 3; e 4; e 5; e 100; e 50` via serial, one per ~1.5 s | Camera frame or photodiode array | Eyeball check (manual) — automated version requires multi-pixel sensor |
 
 ### P1 — would degrade UX
@@ -158,18 +166,18 @@ For tests that sweep a parameter (e.g., Triggered at 100 Hz / 1 kHz / 8 kHz / 22
 | 6 | **Gated brightness matches Persistent** | `g` (Gated checkerboard duty=192) with AD3 holding GP45 HIGH for 100 ms, then compare to Persistent at same pattern | A0 photodiode integration | Mean photodiode value during HIGH window within 10% of Persistent reference |
 | 7 | **Gated drop latency** | AD3 generates HIGH (100 ms) → LOW step | Saleae D0 (EINT) + A0 (photodiode) | Photodiode drops below threshold within 60 µs of EINT falling (50 µs row-drive worst case + 10 µs margin) |
 | 8 | **Error display interrupts + restores Triggered** | `T` + AD3 firing edges at 100 Hz; midway through (e.g., after 10 edges), inject `e 2` | Saleae all rows + photodiode | PE02 glyph visible for ~1 s; then Triggered resumes from edge 11 |
-| 9 | **Error rate-limit (1 per 5 s)** | panel_master injects 10 bad-parity messages over 1 s | Saleae photodiode + serial heartbeat | Exactly 1 error glyph displayed; serial heartbeat shows `err_displayed:1, err_suppressed:9` |
-| 10 | **CIPO unchanged during error window** | panel_master sends valid 0x10, captures CIPO; injects error; sends another 0x10 during error window, captures CIPO | Saleae SPI channels | Second CIPO capture identical to first |
+| 9 | **Error rate-limit (1 per 5 s)** | the arena master injects 10 bad-parity messages over 1 s | Saleae photodiode + serial heartbeat | Exactly 1 error glyph displayed; serial heartbeat shows `err_displayed:1, err_suppressed:9` |
+| 10 | **CIPO unchanged during error window** | the arena master sends valid 0x10, captures CIPO; injects error; sends another 0x10 during error window, captures CIPO | Saleae SPI channels | Second CIPO capture identical to first |
 
 ### P2 — verify if time permits
 
 | # | Test | Stimulus | Capture | Pass criterion |
 |---|---|---|---|---|
 | 11 | **Triggered frequency sweep** | AD3 sweeps 100 Hz → 50 kHz, 20-edge bursts | Saleae | First missed edge identifies the actual per-row drive limit; compare to spec table |
-| 12 | **duty_cycle sweep — measure LED-on width** | duty=1, 16, 64, 85, 128, 192, 255 (via modified `T` command rebuilt each time, or panel_master) | Saleae A0 photodiode | Per-row LED-on width measured; update spec table with empirical values |
+| 12 | **duty_cycle sweep — measure LED-on width** | duty=1, 16, 64, 85, 128, 192, 255 (via modified `T` command rebuilt each time, or the arena master) | Saleae A0 photodiode | Per-row LED-on width measured; update spec table with empirical values |
 | 13 | **865 ns trigger-to-LED latency** (spec line 775) | AD3 single rising edge | Saleae D0 + A0 (high time resolution) | edge-to-photodiode-rise delay measured; expected ~1 µs (includes photodiode response time) |
 | 14 | **EINT signal quality** (spec line 852) | AD3 sources rising edge; capture both source and panel-side EINT | Saleae D0 + D7 (panel-side EINT via probe) | No falling-edge ringing that would re-fire a row |
-| 15 | **Cross-core soak** | panel_master streams mixed valid + invalid traffic for 60 s | Saleae photodiode + serial | No panel hangs; `frames_skipped` near 0; visible state matches commanded state |
+| 15 | **Cross-core soak** | the arena master streams mixed valid + invalid traffic for 60 s | Saleae photodiode + serial | No panel hangs; `frames_skipped` near 0; visible state matches commanded state |
 
 ---
 
@@ -237,7 +245,7 @@ Already in firmware (build `pico_v031_bcmtest`):
 | `g` | Push Gated checkerboard (duty=192) |
 | `t` | Scan-period timing benchmark (existing) |
 
-**To inject duty_cycle-varied Triggered patterns for sweep tests**: either (a) modify the `T` handler in `panel/src/main.cpp` and rebuild, or (b) use panel_master to send real 0x12 commands with arbitrary duty_cycle bytes. Approach (b) is more realistic but requires panel_master to be on the SPI bus (production firmware needed, not bcmtest).
+**To inject duty_cycle-varied Triggered patterns for sweep tests**: either (a) modify the `T` handler in `panel/src/main.cpp` and rebuild, or (b) use the arena master to send real 0x12 commands with arbitrary duty_cycle bytes. Approach (b) is more realistic but requires the arena master to be on the SPI bus (production firmware needed, not bcmtest).
 
 ---
 
@@ -265,7 +273,7 @@ These came up during implementation and need empirical answers Tuesday:
 1. **EINT polarity on production hardware**: spec says rising-edge; prototype rig showed falling-edge fire due to ringing (spec line 852). Production board may or may not reproduce.
 2. **Actual per-row drive time at each (duty_cycle, gray_level)**: the spec table values are derived from `base_T = 3 µs` and the BCM weight sum. Confirm against photodiode measurements; update the spec doc with empirical numbers.
 3. **865 ± 17 ns trigger-to-LED latency** (spec line 775): re-confirm on production board (prototype measurement).
-4. **Cross-core stability under mixed traffic**: implementation review found no race, but soak testing under realistic panel_master load is the real proof.
+4. **Cross-core stability under mixed traffic**: implementation review found no race, but soak testing under realistic arena-master load is the real proof.
 5. **EINT input impedance behavior with pull-down**: confirm the function-gen source impedance + pull-down combo doesn't degrade rising-edge sharpness. If it does, switch to floating + external pull (or just no pull) and document.
 
 ---
