@@ -32,24 +32,32 @@
 
 static uint8_t conf_buf_[3] = {0x81, 0x00, 0x00};
 
-// Push the 3 confirmation bytes into the SPI TX FIFO. Drain anything already
-// queued first (e.g., zero fillers from a previous transaction) so the
-// confirmation bytes land at positions 0..2 of the next master transaction.
+// Push the 3 confirmation bytes into the SPI TX FIFO. Both TX and RX FIFOs
+// are cleared in hardware first via an SSE (SPI Synchronous Serial Enable)
+// toggle.
+//
+// PATCH (G6-ArenaSlim PE03 bring-up): the slave-mode TX FIFO does not drain
+// between transactions (it only drains via SCK pulses, which require CS to be
+// asserted by the master). Because custom_spi_read_blocking's flow-control
+// condition (`rx_remaining < tx_remaining + fifo_depth`) lets the polling
+// loop push up to 8 bytes ahead of bytes read, every transaction leaves ~8
+// leftover zero-filler bytes in the TX FIFO. Without clearing them, the next
+// reload_tx_fifo() call would block in spi_is_writable() until the *next*
+// master transaction starts and clocks the FIFO down — by which point the
+// slave has missed several bytes of that new transaction and num_rx
+// undercounts (-> PE03 length error). The effect worsens at lower SCK rates
+// where the inter-transaction drain takes proportionally longer absolute time.
+//
+// SSE-toggle clears both FIFOs (TX + RX) and resets the shift register in
+// hardware, instantly. With CS high (slave idle) it is safe.
 static void __not_in_flash_func(reload_tx_fifo)() {
-    // Drain any pending TX data: read RX (and discard) and pop TX FIFO via
-    // hardware reset of the SPI block's FIFO. The pico SDK exposes
-    // spi_get_hw()->dr (RX) but no "TX-only flush" — we just write the FIFO
-    // afresh on top of whatever is there. Since FIFO depth is 8 and we only
-    // wrote up to 3 bytes earlier, and any previous transaction completed
-    // when CS went high (TX FIFO empty by then), this is safe.
-    //
-    // Defensive: explicitly clear by toggling SPI enable. The pico-SDK
-    // `spi_set_baudrate()` documentation notes the SPI block can be
-    // disabled+enabled around config changes without losing data. We use a
-    // lighter approach: just push our 3 bytes; the FIFO will drain naturally.
+    // Disable + re-enable the SPI block to clear both FIFOs.
+    hw_clear_bits(&spi_get_hw(SPI_INST)->cr1, SPI_SSPCR1_SSE_BITS);
+    hw_set_bits(&spi_get_hw(SPI_INST)->cr1,   SPI_SSPCR1_SSE_BITS);
+
+    // Now the TX FIFO is guaranteed empty. The 3 pushes will succeed
+    // immediately without spinning on spi_is_writable.
     for (size_t i = 0; i < 3; i++) {
-        // Wait for room (FIFO depth 8, normally empty between transactions)
-        while (!spi_is_writable(SPI_INST)) { }
         spi_get_hw(SPI_INST)->dr = (uint32_t) conf_buf_[i];
     }
 }
