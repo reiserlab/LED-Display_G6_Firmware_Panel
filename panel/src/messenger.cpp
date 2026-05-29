@@ -12,14 +12,10 @@
 // S2.2: Display lives in main.cpp; we read frames_skipped_ for the heartbeat.
 extern Display display;
 
-// PATCH (G6-ArenaSlim PE03 hunt): capture the first PE03-triggering message
-// of each diagnostic window. Written by the validity gate in update(),
-// drained by the per-1000-msg diagnostic block. Buffer is sized to the
-// largest possible message so we can dump the full received payload.
-static uint8_t  g_pe03_data[MESSAGE_MAXIMUM_SIZE] = {0};
-static uint32_t g_pe03_num_bytes = 0;
-static bool     g_pe03_dirty = false;
-
+// Build with -DSPI_DIAG=1 to enable the SPI timing + validity-gate serial
+// diagnostics in update() (per-1000-message histograms and a parity dump).
+// Off by default: the diagnostics do blocking Serial work on core 0 and can
+// cost the occasional frame.
 
 Messenger::Messenger(queue_t &display_queue, queue_t &error_request_queue)
     : display_queue_(display_queue),
@@ -108,12 +104,9 @@ void Messenger::update() {
 
     static Message msg;
 
-    // PATCH (G6-ArenaSlim PE03 hunt, timing probe):
-    // Bucket the wall-clock gap between consecutive update() entries so we
-    // can tell whether post-receive processing is spilling past the master's
-    // inter-transaction window (~3.13 ms at 300 Hz GS16). If most gaps land
-    // in the 4-8 ms bin, every other transaction is being missed and the
-    // FIFO-overflow signature (num_bytes=8) follows naturally.
+#if SPI_DIAG
+    // Wall-clock gap between consecutive update() entries: detects when
+    // post-receive processing spills past the master's inter-frame window.
     static uint64_t t_last_enter = 0;
     static uint32_t gap_bins[6] = {0};   // <1, <2, <4, <8, <16, >=16 ms
     static uint32_t gap_max_us  = 0;
@@ -130,18 +123,19 @@ void Messenger::update() {
     }
     t_last_enter = t_enter;
 
-    // Time spent inside panel_spi_read — the wait-for-CS↓ spin plus the
-    // actual byte read. Captured separately for each branch of last_num_bytes
-    // (n==203 success vs n==8 FIFO-overflow) so we can tell which one is
-    // taking the long time.
     uint64_t t_spi_start = time_us_64();
+#endif
+
     panel_spi_read(msg);
-    uint64_t t_spi_end   = time_us_64();
+
+#if SPI_DIAG
+    // Time inside panel_spi_read, bucketed by received length so a full frame
+    // (n==203) is distinguishable from a short / overflow capture (n==8).
     static uint32_t spi_bins_n203[6] = {0};
     static uint32_t spi_bins_n8  [6] = {0};
     static uint32_t spi_bins_oth [6] = {0};
     {
-        uint32_t spi_us = (uint32_t)(t_spi_end - t_spi_start);
+        uint32_t spi_us = (uint32_t)(time_us_64() - t_spi_start);
         uint32_t *bins = (msg.num_bytes() == 203) ? spi_bins_n203
                        : (msg.num_bytes() ==   8) ? spi_bins_n8
                                                   : spi_bins_oth;
@@ -153,23 +147,18 @@ void Messenger::update() {
         else                     bins[5]++;
     }
 
-    // Wall-clock time of just the post-receive processing — from here to
-    // the bottom of update(). Isolates dispatch/queue/crc cost from the
-    // panel_spi_read wait-for-CS↓ time captured in the gap histogram.
     uint64_t t_post_recv_start = time_us_64();
     msg_count_ += 1;
+#endif
 
-    // S1.4: reset COMM_CHECK byte-validation flag at the start of every
-    // update() so it doesn't carry across non-COMM_CHECK messages.
+    // Reset the COMM_CHECK byte-validation flag each message so it can't carry
+    // across non-COMM_CHECK messages.
     comm_check_ok_ = true;
 
-    // Snapshot the error-display flag once per message so all decisions
-    // (dispatch, CIPO arming, error raise) see a consistent view.
+    // Snapshot the error-display flag once so dispatch, CIPO arming, and the
+    // error-raise decision all see a consistent view.
     bool err_active = Display::error_display_active;
 
-    // S1.2: wire check_protocol() into the validity gate alongside parity
-    // and length. Without this, a message with unsupported version bits but
-    // a known command would still be dispatched.
     bool parity_ok   = msg.check_parity();
     bool length_ok   = msg.check_length();
     bool protocol_ok = msg.check_protocol(CMD_PROTOCOL);
@@ -182,24 +171,12 @@ void Messenger::update() {
         }
     }
 
-    // Trigger PE codes on validity-gate failures. First-detected wins:
-    // parity > length > protocol > unknown opcode. Suppressed while the
-    // panel is already showing an error glyph.
+    // Raise a PE code on the first failing gate (parity > length > protocol >
+    // unknown opcode). Suppressed while an error glyph is already showing.
     if (!err_active) {
         if (!parity_ok) {
             raise_error(PREDEF_SLOT_PE02);
         } else if (!length_ok) {
-            // PATCH (G6-ArenaSlim PE03 hunt): capture the first PE03-triggering
-            // message of each diagnostic window into the file-scope buffers
-            // (declared just below the includes). Cleared after print.
-            if (!g_pe03_dirty) {
-                g_pe03_dirty = true;
-                g_pe03_num_bytes = (uint32_t)msg.num_bytes();
-                const uint8_t *src = msg.data_ptr();
-                size_t cap = sizeof(g_pe03_data);
-                size_t n = msg.num_bytes() < cap ? msg.num_bytes() : cap;
-                for (size_t i = 0; i < n; i++) g_pe03_data[i] = src[i];
-            }
             raise_error(PREDEF_SLOT_PE03);
         } else if (!protocol_ok) {
             raise_error(PREDEF_SLOT_PE04);
@@ -208,16 +185,11 @@ void Messenger::update() {
         }
     }
 
-    // S1.3: arm the CIPO confirmation buffer per the plan's buffer-update rule.
-    //  - Valid + COMM_CHECK passed:  arm {header, cmd, checksum}
-    //  - Valid COMM_CHECK that byte-mismatched (comm_check_ok_ == false):
-    //                                arm {header, 0xFF, 0x00}  (sentinel)
-    //  - Any other invalidity:       do NOT touch the buffer (per spec)
-    //  - During error-display window: do NOT touch the buffer (matches the
-    //    spec rule for invalid messages; observable behavior matches "panel
-    //    silently rejected the command", which is the truth)
+    // Arm the CIPO confirmation for the next transaction, only on a fully valid
+    // message. A byte-mismatched COMM_CHECK arms the {header, 0xFF, 0x00}
+    // sentinel; any invalidity leaves the previous buffer untouched (per spec).
     if (!err_active && parity_ok && length_ok && protocol_ok && cmd_ok) {
-        uint8_t in_version = msg.header_byte() & 0b01111111;  // 0x01 (V1 only)
+        uint8_t in_version = msg.header_byte() & 0b01111111;  // V1 only
         if (cmd_id == CMD_ID_COMMS_CHECK && !comm_check_ok_) {
             uint8_t hdr = Message::header_with_parity_for_3byte(
                 in_version, 0xFF, 0x00);
@@ -229,10 +201,8 @@ void Messenger::update() {
             panel_spi_arm_confirmation(hdr, cmd_id, chk);
         }
     }
-    // else: buffer stays as the previous valid confirmation OR the empty
-    // sentinel (already loaded into the TX FIFO between transactions).
 
-    // Bucket the post-receive processing time the same way as the gap.
+#if SPI_DIAG
     static uint32_t proc_bins[6] = {0};
     static uint32_t proc_max_us  = 0;
     {
@@ -246,9 +216,7 @@ void Messenger::update() {
         if (proc_us > proc_max_us) proc_max_us = proc_us;
     }
 
-    // PATCH (G6-ArenaSlim PE03 hunt, timing probe):
-    // Single-line histograms every 1000 messages. Kept terse so the
-    // Serial.write itself doesn't dominate the stall we're trying to measure.
+    // Terse single-line histograms + last-frame gate state every 1000 msgs.
     // Bins are cumulative across the run; read deltas between prints.
     if (msg_count_ % 1000 == 0) {
         Serial.print("gap_us [<1k <2k <4k <8k <16k >=16k]: ");
@@ -270,10 +238,6 @@ void Messenger::update() {
         Serial.print(" last_n=");
         Serial.println(msg.num_bytes());
 
-        // PATCH (DMA-RX bring-up): where is the last frame landing in the
-        // validity gate, and what are its leading bytes? Tells us whether the
-        // DMA-captured bytes are correctly aligned (hdr should be 0x01/0x81,
-        // cmd a known opcode) and whether it actually dispatched + enqueued.
         Serial.print("gate p/l/pr/cmd/cc=");
         Serial.print(parity_ok);   Serial.print('/');
         Serial.print(length_ok);   Serial.print('/');
@@ -293,15 +257,13 @@ void Messenger::update() {
         Serial.print(" errD/S=");  Serial.print(error_displayed_count_);
         Serial.print('/');         Serial.println(error_suppressed_count_);
 
-        // PATCH (parity hunt): on a parity miss, show the panel's own computed
-        // parity vs the received bit, the total payload popcount, and exactly
-        // which received bytes differ from the expected all-0xFF "All On"
-        // pattern. An odd number of differing bits is what flips parity.
+        // On a parity miss, show the panel's computed parity vs the received
+        // bit and which payload bytes differ from the all-0xFF "All On" frame.
         if (!parity_ok) {
             uint8_t *d = msg.data_ptr();
             size_t   n = msg.num_bytes();
             size_t   non_ff = 0, first_bad = SIZE_MAX; uint8_t first_bad_val = 0;
-            for (size_t i = 2; i < n; i++) {            // payload region only
+            for (size_t i = 2; i < n; i++) {
                 if (d[i] != 0xFF) {
                     if (first_bad == SIZE_MAX) { first_bad = i; first_bad_val = d[i]; }
                     non_ff++;
@@ -319,46 +281,7 @@ void Messenger::update() {
             Serial.print("=0x");              Serial.println(d[n - 1], HEX);
         }
     }
-
-    // DEVEL serial heartbeat
-    // -----------------------------------------------------------
-    // if (msg_count_ % 1000 == 0) {
-    //     Serial << "msg_count:        " << msg_count_  << endl;
-    //     Serial << "parity_ok:        " << parity_ok   << endl;
-    //     Serial << "length_ok:        " << length_ok   << endl;
-    //     Serial << "protocol_ok:      " << protocol_ok << endl;
-    //     Serial << "cmd_ok:           " << cmd_ok      << endl;
-    //     Serial << "comm_check_ok:    " << comm_check_ok_ << endl;
-    //     Serial << "queue_drops:      " << queue_drops_   << endl;
-    //     Serial << "frames_skipped:   " << display.frames_skipped() << endl;
-    //     Serial << "err_displayed:    " << error_displayed_count_ << endl;
-    //     Serial << "err_suppressed:   " << error_suppressed_count_ << endl;
-    //     if (g_pe03_dirty) {
-    //         // Dump the first PE03-rejected message of this window, full
-    //         // payload in 16-byte hex rows. Note: this print blocks core 0
-    //         // for many ms (USB CDC), so a few subsequent transactions may
-    //         // be missed; that's an acceptable trade in diagnostic mode.
-    //         size_t cap = sizeof(g_pe03_data);
-    //         size_t n = g_pe03_num_bytes < cap ? g_pe03_num_bytes : cap;
-    //         Serial << "pe03_first:       num_bytes=" << g_pe03_num_bytes << endl;
-    //         for (size_t i = 0; i < n; i += 16) {
-    //             Serial << "  ";
-    //             if (i < 0x10)   Serial << "000";
-    //             else if (i < 0x100) Serial << "00";
-    //             else                Serial << "0";
-    //             Serial << _HEX(i) << ": ";
-    //             size_t row_end = (i + 16 < n) ? i + 16 : n;
-    //             for (size_t j = i; j < row_end; j++) {
-    //                 if (g_pe03_data[j] < 0x10) Serial << "0";
-    //                 Serial << _HEX(g_pe03_data[j]) << " ";
-    //             }
-    //             Serial << endl;
-    //         }
-    //         g_pe03_dirty = false;
-    //     }
-    //     Serial << endl;
-    // }
-    // -----------------------------------------------------------
+#endif
 }
 
 

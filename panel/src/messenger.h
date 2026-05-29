@@ -23,11 +23,11 @@ class Messenger {
         queue_t &display_queue_;
         queue_t &error_request_queue_;
         uint64_t msg_count_ = 0;
-        uint64_t queue_drops_ = 0;       // S1.6: count display-pattern queue overflows
-        uint64_t error_displayed_count_ = 0;  // # of error glyphs actually pushed to core 1
-        uint64_t error_suppressed_count_ = 0; // # of error raises silently rate-limited
-        uint64_t last_error_raised_us_ = 0;   // wall-clock of last raise (whether displayed or suppressed)
-        bool     comm_check_ok_ = true;  // S1.4: COMM_CHECK byte-validation result; reset each update()
+        uint64_t queue_drops_ = 0;            // display-pattern queue overflows
+        uint64_t error_displayed_count_ = 0;  // # of error glyphs pushed to core 1
+        uint64_t error_suppressed_count_ = 0; // # of error raises rate-limited away
+        uint64_t last_error_raised_us_ = 0;   // wall-clock of last raise
+        bool     comm_check_ok_ = true;       // COMM_CHECK result; reset each update()
 
         CommandUMap cmd_umap_;
         void on_cmd_comms_check(Message &msg);

@@ -6,35 +6,27 @@
 #include "constants.h"
 #include "panel_spi_custom.h"
 
-// ============================================================================
-// PROTOTYPE: DMA-based SPI-slave RX (PE03 root-cause fix attempt)
-// ============================================================================
-// Replaces the software-polled custom_spi_read_blocking() that read the PL022
-// RX FIFO one byte at a time on core 0. That approach lost bytes whenever core
-// 0 entered the read loop late or stalled mid-burst: the 8-deep RX FIFO
-// overran and num_bytes_ came back wrong (the classic n==8 signature) ->
-// check_length() fails -> PE03.  See hypothesis.md (H1/H3/H4/H5).
+// ----------------------------------------------------------------------------
+// DMA-paced SPI-slave RX/TX.
 //
-// Here, byte capture is hardware-paced by two DMA channels driven off the SPI
-// DREQs, so it is immune to core-0 processing latency *within* a burst:
+// Two DMA channels driven off the SPI DREQs move bytes in hardware, so
+// reception is immune to core-0 processing latency within a burst (the polled
+// predecessor lost bytes when core 0 entered the read loop late and the 8-deep
+// RX FIFO overran). Framing is taken from CS edges — core 0 polls only the
+// edges, never per byte — and the received length comes from the RX DMA's
+// residual transfer_count.
+//
 //   - RX DMA: SPI DR -> msg.data_, paced by RX DREQ, count = MESSAGE_MAXIMUM.
-//   - TX DMA: tx_buf_ -> SPI DR, paced by TX DREQ, count = MESSAGE_MAXIMUM.
-//             tx_buf_[0..2] hold the armed CIPO confirmation; [3..] are 0x00
-//             filler so the TX FIFO never underflows mid-frame.
+//   - TX DMA: tx_buf_ -> SPI DR,   paced by TX DREQ, count = MESSAGE_MAXIMUM.
+//             tx_buf_[0..2] = armed CIPO confirmation; [3..] = 0x00 filler so
+//             the TX FIFO never underflows mid-frame.
 //
-// Framing is still derived from CS, but core 0 only polls CS *edges* (cheap),
-// never per byte. The received length is read from the RX DMA's residual
-// transfer_count after CS rises.
+// Remaining limitation: if core 0 is busy past a whole CS window the frame is
+// skipped, not corrupted (we never arm mid-burst). The fully IRQ-driven variant
+// noted at the bottom removes even that.
 //
-// The single remaining failure mode is missing a *whole* frame if core 0 is
-// busy past an entire CS window — which produces a skipped update, NOT a PE03
-// (we never arm mid-burst, so we never capture a partial frame). The durable
-// fix for that is the fully IRQ-driven variant noted at the bottom of this
-// file.
-//
-// NOTE: This is a bring-up prototype. Items marked [VERIFY] must be confirmed
-// on hardware / against the RP2350 datasheet before this is trusted.
-// ============================================================================
+// [VERIFY] items must be confirmed on hardware / against the RP2350 datasheet.
+// ----------------------------------------------------------------------------
 
 // CIPO confirmation slot + filler. Index 0..2 = {header, cmd, checksum};
 // 3..MAX-1 = 0x00. Boot/empty sentinel is {0x81, 0x00, 0x00}.
@@ -134,40 +126,35 @@ void panel_spi_clear_confirmation() {
 void panel_spi_read(Message &msg) {
     ensure_dma_init();
 
-    // 1. Make sure we start from an idle bus so we never arm mid-burst (which
-    //    would capture only a frame tail -> a false short count -> PE03).
-    //    If we entered late and CS is already low, wait out that burst first.
+    // Start from an idle bus so we never arm mid-burst (a partial-tail capture
+    // would be a false short count). If we entered late with CS already low,
+    // wait that burst out first.
     while (!gpio_get(SPI_CS_PIN)) { tight_loop_contents(); }
 
-    // 2. Discard any residual RX (no SSE toggle — see spi_drain_rx), then arm.
     spi_drain_rx();
     arm_dma(msg.data_.data());
 
-    // 3. Wait for the master to start (CS falling) then finish (CS rising).
-    while (gpio_get(SPI_CS_PIN))  { tight_loop_contents(); }   // start
-    while (!gpio_get(SPI_CS_PIN)) { tight_loop_contents(); }   // end
+    while (gpio_get(SPI_CS_PIN))  { tight_loop_contents(); }   // CS falling: start
+    while (!gpio_get(SPI_CS_PIN)) { tight_loop_contents(); }   // CS rising: end
 
-    // 4. Let the final byte propagate shift-reg -> RX FIFO -> DMA. The
-    //    controller's cs_hold delay (~2.5 us at 10 MHz, Arena constants.h:65)
-    //    already covers most of this; a small extra settle is cheap insurance.
-    //    [VERIFY] 2 us is comfortably > FIFO drain time at sysclk.
+    // Let the final byte propagate shift-reg -> RX FIFO -> DMA. The controller's
+    // cs_hold delay (~2.5 us at 10 MHz, Arena constants.h:65) covers most of it.
+    // [VERIFY] 2 us comfortably exceeds FIFO drain time at sysclk.
     busy_wait_us(2);
 
-    // 5. Received count = programmed length - residual transfer count.
-    //    [VERIFY] On RP2350, reading transfer_count returns transfers REMAINING.
+    // [VERIFY] On RP2350, reading transfer_count returns transfers REMAINING.
     uint32_t remaining = dma_channel_hw_addr(rx_dma_chan_)->transfer_count;
     size_t   received  = (remaining > MESSAGE_MAXIMUM_SIZE)
                              ? 0
                              : (size_t)(MESSAGE_MAXIMUM_SIZE - remaining);
 
-    // 6. Stop both channels so they can be re-armed next call.
     dma_channel_abort(rx_dma_chan_);
     dma_channel_abort(tx_dma_chan_);
 
     msg.num_bytes_ = received;
 
-    // Per spec: clear the armed confirmation only if the master clocked a full
-    // 3-byte CIPO slot. Fragmented transactions leave the buffer armed.
+    // Clear the armed confirmation only once the master clocked a full 3-byte
+    // CIPO slot; fragmented transactions leave it armed (per spec).
     if (msg.num_bytes_ >= 3) {
         panel_spi_clear_confirmation();
     }
