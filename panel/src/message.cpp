@@ -45,7 +45,7 @@ uint8_t Message::parity_bit() {
 
 void Message::set_parity_bit() {
     uint8_t parity = calculate_parity_bit();
-    bitWrite(data_.at(0), 7, parity); 
+    bitWrite(data_.at(0), 7, parity);
 }
 
 
@@ -55,7 +55,7 @@ bool Message::check_parity() {
 
 
 bool Message::check_length() {
-    bool ok = num_bytes_ >= MESSAGE_MINIMUM_SIZE; 
+    bool ok = num_bytes_ >= MESSAGE_MINIMUM_SIZE;
     uint8_t cmd = command_byte();
     if (PAYLOAD_SIZE_UMAP.find(cmd) != PAYLOAD_SIZE_UMAP.end()) {
         size_t payload_size = PAYLOAD_SIZE_UMAP.at(cmd);
@@ -220,7 +220,7 @@ uint8_t Message::calculate_parity_bit() {
         uint8_t byte = data_.at(i);
         if (i==0) {
             // Mask parity bit
-            byte &= 0b01111111; 
+            byte &= 0b01111111;
         }
         sum += std::bitset<CHAR_BIT * sizeof(uint8_t)>(byte).count();
     }
@@ -415,4 +415,3 @@ void Message::to_pattern_gray_16(Pattern &pat) {
     // Set duty_cycle to last payload value
     pat.set_duty_cycle(data_.at(num_bytes_-1));
 }
-
