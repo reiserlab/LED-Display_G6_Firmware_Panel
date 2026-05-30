@@ -98,6 +98,10 @@ static int __not_in_flash_func(custom_spi_read_blocking)(
 {
     invalid_params_if(HARDWARE_SPI, 0 > (int)len);
     const size_t fifo_depth = 8;
+    // After CS-high, poll up to this many times for a straggler RX byte still
+    // propagating through the input synchronizer + SSP RX pipeline before
+    // concluding the transaction is drained (counter resets on each read).
+    const uint32_t RX_DRAIN_SETTLE = 256;
     size_t rx_remaining = len, tx_remaining = len;
     size_t tx_index = 0;
     int num_rx = 0;
@@ -128,8 +132,29 @@ static int __not_in_flash_func(custom_spi_read_blocking)(
             --rx_remaining;
             num_rx++;
         }
-        // Check if master de-asserted CS (transaction ended)
+        // Check if master de-asserted CS (transaction ended).
         if (gpio_get(cs_pin)) {
+            // The final data byte's last SCK edge can precede the CS rising
+            // edge by less than the RX-path latency (input synchronizer + SSP
+            // RX pipeline), so that byte may not be spi_is_readable() yet at
+            // the instant gpio_get() reports CS high. Breaking immediately
+            // returns one byte short -> check_length() fails -> PE03. Drain any
+            // straggler(s) first, bounded by RX_DRAIN_SETTLE consecutive empty
+            // polls (reset on each read) so a finished or truncated transaction
+            // still exits promptly and can never hang. CS is high, so the
+            // master is not clocking — no bytes from the next transaction can
+            // enter the FIFO during this drain.
+            uint32_t settle = 0;
+            while (rx_remaining && settle < RX_DRAIN_SETTLE) {
+                if (spi_is_readable(spi)) {
+                    *dst++ = (uint8_t) spi_get_hw(spi)->dr;
+                    --rx_remaining;
+                    num_rx++;
+                    settle = 0;
+                } else {
+                    ++settle;
+                }
+            }
             break;
         }
     }
