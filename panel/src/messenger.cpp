@@ -7,11 +7,89 @@
 #include "predef_patterns.h"
 #include "predef_patterns_table.h"
 #include "display.h"
+#include "protocol.h"
 #include <Streaming.h>
 #include <cstdio>
 
 // S2.2: Display lives in main.cpp; we read frames_skipped_ for the heartbeat.
 extern Display display;
+
+
+#if SPI_DIAG
+// ---------------------------------------------------------------------------
+// SPI_DIAG — silent reception diagnostics (build flag -DSPI_DIAG=1).
+//
+// Behaves identically to production during streaming: counters are cheap
+// in-RAM increments and there is NO serial output. On the one-shot 'd'
+// command the whole picture is dumped in a single burst; 'z' zeros the
+// window. Goal: localize the ~7% rejected-frame flicker — is it parity (bit
+// corruption) vs length (dropped/shifted bytes), which command, and is the
+// got-vs-expected byte count "short by N" (framing) or random?
+// ---------------------------------------------------------------------------
+namespace {
+struct DiagFail { uint8_t cmd; uint16_t got; uint16_t expected; uint8_t flags; };
+// flags: bit0=parity bit1=length bit2=protocol bit3=unknown-cmd
+constexpr size_t DIAG_RING = 32;
+uint32_t diag_msgs = 0, diag_reject_any = 0;
+uint32_t diag_parity_fail = 0, diag_length_fail = 0, diag_protocol_fail = 0, diag_unknown_cmd = 0;
+uint32_t diag_cmd_hist[256] = {0};
+DiagFail diag_ring[DIAG_RING];
+size_t   diag_ring_head = 0, diag_ring_count = 0;
+
+uint16_t diag_expected_len(uint8_t cmd) {
+    auto it = PAYLOAD_SIZE_UMAP.find(cmd);
+    return (it != PAYLOAD_SIZE_UMAP.end()) ? (uint16_t)(it->second + HEADER_SIZE) : 0;
+}
+void diag_record(uint8_t cmd, uint16_t got, uint8_t flags) {
+    DiagFail &f = diag_ring[diag_ring_head];
+    f.cmd = cmd; f.got = got; f.expected = diag_expected_len(cmd); f.flags = flags;
+    diag_ring_head = (diag_ring_head + 1) % DIAG_RING;
+    if (diag_ring_count < DIAG_RING) diag_ring_count++;
+}
+void diag_reset() {
+    diag_msgs = diag_reject_any = 0;
+    diag_parity_fail = diag_length_fail = diag_protocol_fail = diag_unknown_cmd = 0;
+    diag_ring_head = diag_ring_count = 0;
+    for (int i = 0; i < 256; i++) diag_cmd_hist[i] = 0;
+}
+inline void diag_emit(const char *b, int n) {
+    if (n > 0) Serial.write(reinterpret_cast<const uint8_t *>(b),
+                            (size_t)(n < (int)160 ? n : 159));
+}
+// Blocking burst — only ever runs on an explicit 'd', never during the
+// measurement window, so blocking on the USB-CDC FIFO is fine here.
+void diag_dump() {
+    char b[160];
+    diag_emit(b, snprintf(b, sizeof(b),
+        "\r\n=== SPI_DIAG (PANEL_REV=%d) ===\r\n", (int)PANEL_REV));
+    unsigned long pml = diag_msgs
+        ? (unsigned long)((uint64_t)diag_reject_any * 1000u / diag_msgs) : 0;
+    diag_emit(b, snprintf(b, sizeof(b), "msgs=%lu reject_any=%lu (%lu.%lu%%)\r\n",
+        (unsigned long)diag_msgs, (unsigned long)diag_reject_any, pml / 10, pml % 10));
+    diag_emit(b, snprintf(b, sizeof(b),
+        "parity_fail=%lu length_fail=%lu protocol_fail=%lu unknown_cmd=%lu\r\n",
+        (unsigned long)diag_parity_fail, (unsigned long)diag_length_fail,
+        (unsigned long)diag_protocol_fail, (unsigned long)diag_unknown_cmd));
+    diag_emit(b, snprintf(b, sizeof(b), "cmd_hist:"));
+    for (int c = 0; c < 256; c++)
+        if (diag_cmd_hist[c])
+            diag_emit(b, snprintf(b, sizeof(b), " 0x%02X=%lu", c,
+                                  (unsigned long)diag_cmd_hist[c]));
+    Serial.write(reinterpret_cast<const uint8_t *>("\r\n"), 2);
+    diag_emit(b, snprintf(b, sizeof(b),
+        "last %u fails (cmd got/exp PLRU):\r\n", (unsigned)diag_ring_count));
+    for (size_t i = 0; i < diag_ring_count; i++) {
+        size_t idx = (diag_ring_head + DIAG_RING - diag_ring_count + i) % DIAG_RING;
+        const DiagFail &f = diag_ring[idx];
+        diag_emit(b, snprintf(b, sizeof(b), "  0x%02X got=%u exp=%u %c%c%c%c\r\n",
+            f.cmd, f.got, f.expected,
+            (f.flags & 1) ? 'P' : '.', (f.flags & 2) ? 'L' : '.',
+            (f.flags & 4) ? 'R' : '.', (f.flags & 8) ? 'U' : '.'));
+    }
+    Serial.write(reinterpret_cast<const uint8_t *>("=== end ===\r\n"), 13);
+}
+} // namespace
+#endif
 
 
 Messenger::Messenger(queue_t &display_queue, queue_t &error_request_queue)
@@ -126,10 +204,36 @@ void Messenger::update() {
         }
     }
 
+#if SPI_DIAG
+    // Silent per-message accounting. Count each failing check INDEPENDENTLY
+    // (a dropped-bytes frame fails both parity and length — we want to see
+    // both, not just the first-wins one the error-raise below picks).
+    {
+        diag_msgs++;
+        diag_cmd_hist[cmd_id]++;
+        uint8_t flags = 0;
+        if (!parity_ok)   { diag_parity_fail++;   flags |= 1; }
+        if (!length_ok)   { diag_length_fail++;   flags |= 2; }
+        if (!protocol_ok) { diag_protocol_fail++; flags |= 4; }
+        if (parity_ok && length_ok && protocol_ok && cmd_umap_.count(cmd_id) == 0) {
+            diag_unknown_cmd++; flags |= 8;
+        }
+        if (flags) { diag_reject_any++; diag_record(cmd_id, (uint16_t)msg.num_bytes(), flags); }
+    }
+#endif
+
     // Trigger PE codes on validity-gate failures. First-detected wins:
     // parity > length > protocol > unknown opcode. Suppressed while the
     // panel is already showing an error glyph.
-    if (!err_active) {
+    //
+    // Sub-minimum transactions (num_bytes < MESSAGE_MINIMUM_SIZE) are runts —
+    // a 1-2 byte CS glitch or aborted clock, not a message attempt. Flashing a
+    // 3 s PE03/PE04 glyph for what is line noise blanks a streaming display, so
+    // treat runts as "ignore" (SPI_DIAG still counts them, so visibility is
+    // retained). The genuine framing bug behind 'got = expected-1' rejects is
+    // fixed in panel_spi_custom.cpp (drain RX FIFO after CS-high).
+    bool is_runt = msg.num_bytes() < MESSAGE_MINIMUM_SIZE;
+    if (!err_active && !is_runt) {
         if (!parity_ok) {
             raise_error(PREDEF_SLOT_PE02);
         } else if (!length_ok) {
@@ -165,6 +269,19 @@ void Messenger::update() {
     // else: buffer stays as the previous valid confirmation OR the empty
     // sentinel (already loaded into the TX FIFO between transactions).
 
+#if SPI_DIAG
+    // SPI_DIAG: stay SILENT during streaming (no TX). React only to one-shot
+    // input commands — 'd' dumps all counters in one burst, 'z' zeros the
+    // window. Reading input does not transmit, so this adds no traffic to the
+    // measurement window. NOTE: commands are serviced only between transactions,
+    // so send 'd' WHILE the master is still streaming (slowly, e.g. 100 Hz) —
+    // if the stream stops, update() blocks in panel_spi_read and won't see it.
+    while (Serial.available()) {
+        int c = Serial.read();
+        if      (c == 'd') diag_dump();
+        else if (c == 'z') diag_reset();
+    }
+#else
     // DEVEL serial heartbeat — NON-BLOCKING.
     // -----------------------------------------------------------
     // Emitted once per 1000 messages, but only when the USB-CDC TX FIFO has
@@ -192,6 +309,7 @@ void Messenger::update() {
         }
     }
     // -----------------------------------------------------------
+#endif
 }
 
 
