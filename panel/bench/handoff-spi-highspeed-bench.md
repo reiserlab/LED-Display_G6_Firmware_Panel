@@ -60,7 +60,7 @@ cap.export_raw_data_binary(directory="/tmp/spiA_raw/", digital_channels=[0, 1])
 
 **Measurements (Python):**
 - **SCK frequency:** from D0 raw edges — `1 / median(diff(rising_edges_seconds))`; also report min/max to catch master jitter.
-- **CS-high gap histogram:** on D1, gap = each CS **rising** → next CS **falling**; report min / p1 / median / max. **The `min` (or p1) is the hard budget** any per-transaction reset path must beat.
+- **CS-high gap histogram:** on D1, gap = each CS **rising** → next CS **falling**; report min / p1 / median / max. **The `min` (or p1) is the hard budget** any per-transaction reset path must beat. **Measure the gap between consecutive CS-active windows (per-transaction), NOT the frame-to-frame cadence** — Frank's first number (~3333 µs) was the 300 fps frame period, not the inter-transaction gap. Working target: the master should **guarantee ≥0.5 ms** between transactions to the same panel; the panel's per-transaction work is single-digit µs, so confirm the measured min clears 0.5 ms by a wide margin (it almost certainly does).
 - **Bytes/transaction & framing:** from the SPI analyzer table — confirm 3..300-byte frames decode and the CIPO confirmation slot `{header, cmd, CRC-8}` lands at bytes 0–2.
 
 ---
