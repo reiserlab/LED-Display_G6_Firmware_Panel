@@ -88,6 +88,14 @@ void diag_dump() {
     }
     Serial.write(reinterpret_cast<const uint8_t *>("=== end ===\r\n"), 13);
 }
+// Service one-shot host commands (input only, no TX): 'd' dump, 'z' zero.
+void diag_service_commands() {
+    while (Serial.available()) {
+        int c = Serial.read();
+        if      (c == 'd') diag_dump();
+        else if (c == 'z') diag_reset();
+    }
+}
 } // namespace
 #endif
 
@@ -179,6 +187,17 @@ void Messenger::update() {
 
     static Message msg;
     panel_spi_read(msg);
+#if SPI_DIAG
+    // Idle timeout (no transaction): panel_spi_read returned 0 bytes because
+    // the master is between bursts. Service host commands and return without
+    // counting, so 'd'/'z' work while idle and 0-byte reads never pollute the
+    // diagnostic counters. (Never happens during streaming — see the
+    // SPI_DIAG idle timeout in custom_spi_read_blocking.)
+    if (msg.num_bytes() == 0) {
+        diag_service_commands();
+        return;
+    }
+#endif
     msg_count_ += 1;
 
     // S1.4: reset COMM_CHECK byte-validation flag at the start of every
@@ -245,14 +264,21 @@ void Messenger::update() {
         }
     }
 
-    // S1.3: arm the CIPO confirmation buffer per the plan's buffer-update rule.
-    //  - Valid + COMM_CHECK passed:  arm {header, cmd, checksum}
-    //  - Valid COMM_CHECK that byte-mismatched (comm_check_ok_ == false):
-    //                                arm {header, 0xFF, 0x00}  (sentinel)
-    //  - Any other invalidity:       do NOT touch the buffer (per spec)
-    //  - During error-display window: do NOT touch the buffer (matches the
-    //    spec rule for invalid messages; observable behavior matches "panel
-    //    silently rejected the command", which is the truth)
+    // CIPO confirmation buffer — exactly ONE TX-FIFO reload per transaction.
+    // (Formerly two SSE toggles per valid frame: panel_spi_read() cleared to the
+    // sentinel, then this block armed the real confirmation a few µs later. The
+    // clear is now folded in here so each transaction does a single reload.)
+    //
+    //  - Valid + dispatched:  arm {header, cmd, checksum}
+    //        (valid COMM_CHECK that byte-mismatched -> arm {header,0xFF,0x00})
+    //  - >=3 bytes clocked but invalid (or during the error-display window):
+    //        CLEAR to the empty sentinel, so the confirmation just sent on CIPO
+    //        during this transaction is deleted and not re-sent (per spec
+    //        "buffer deleted, each confirmation sent only once").
+    //  - Runt (<3 bytes clocked, is_runt): leave the buffer ARMED — no full
+    //    3-byte CIPO slot was sent, so the confirmation gets another window.
+    //    (Replicates the old `num_bytes >= 3` guard that used to live in
+    //    panel_spi_read().)
     if (!err_active && parity_ok && length_ok && protocol_ok && cmd_ok) {
         uint8_t in_version = msg.header_byte() & 0b01111111;  // 0x01 (V1 only)
         if (cmd_id == CMD_ID_COMMS_CHECK && !comm_check_ok_) {
@@ -270,17 +296,12 @@ void Messenger::update() {
     // sentinel (already loaded into the TX FIFO between transactions).
 
 #if SPI_DIAG
-    // SPI_DIAG: stay SILENT during streaming (no TX). React only to one-shot
-    // input commands — 'd' dumps all counters in one burst, 'z' zeros the
-    // window. Reading input does not transmit, so this adds no traffic to the
-    // measurement window. NOTE: commands are serviced only between transactions,
-    // so send 'd' WHILE the master is still streaming (slowly, e.g. 100 Hz) —
-    // if the stream stops, update() blocks in panel_spi_read and won't see it.
-    while (Serial.available()) {
-        int c = Serial.read();
-        if      (c == 'd') diag_dump();
-        else if (c == 'z') diag_reset();
-    }
+    // SPI_DIAG: stay SILENT during streaming (no TX). Service one-shot input
+    // commands ('d' dump, 'z' zero) between transactions; reading input doesn't
+    // transmit, so no traffic is added to the measurement window. The idle
+    // timeout in custom_spi_read_blocking + the early-return above also service
+    // commands while the master is idle, so 'd'/'z' work between bursts too.
+    diag_service_commands();
 #else
     // DEVEL serial heartbeat — NON-BLOCKING.
     // -----------------------------------------------------------

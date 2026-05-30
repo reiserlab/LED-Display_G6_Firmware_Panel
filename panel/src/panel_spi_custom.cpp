@@ -2,6 +2,9 @@
 #include <hardware/gpio.h>
 #include "constants.h"
 #include "panel_spi_custom.h"
+#if SPI_DIAG
+#include <pico/time.h>   // time_us_32() for the idle timeout (SPI_DIAG only)
+#endif
 
 // ----------------------------------------------------------------------------
 // V1 CIPO confirmation buffer
@@ -106,8 +109,24 @@ static int __not_in_flash_func(custom_spi_read_blocking)(
     size_t tx_index = 0;
     int num_rx = 0;
 
-    // Wait until spi is readable (first bit clocked in by master)
+    // Wait until spi is readable (first bit clocked in by master).
+#if SPI_DIAG
+    // SPI_DIAG only: if the master is idle (CS high, no byte) for >50 ms, bail
+    // and return 0 so the caller can service host commands ('d'/'z') and report
+    // between bursts. Never fires during streaming — frames arrive every few ms
+    // << 50 ms — so streaming timing is identical to production. An XIP stall in
+    // time_us_32() here is harmless: nothing is being clocked while idle.
+    {
+        uint32_t t0 = time_us_32();
+        while (!spi_is_readable(spi)) {
+            if (gpio_get(cs_pin) && (uint32_t)(time_us_32() - t0) > 50000u) {
+                return 0;
+            }
+        }
+    }
+#else
     while(!spi_is_readable(spi)) {};
+#endif
 
     while (rx_remaining || tx_remaining) {
         if (tx_remaining && spi_is_writable(spi) &&
@@ -173,6 +192,12 @@ void panel_spi_read(Message &msg) {
     // Per spec: "After sending it successfully, the temporary buffer is deleted"
     // — but only if the master clocked at least 3 bytes (= a full CIPO slot).
     // Fragmented transactions (< 3 bytes) leave the buffer armed.
+    //
+    // NOTE (2026-05-30): this early clear here + the later arm in
+    // Messenger::update() means each valid frame does TWO SSE toggles. That is
+    // NOT redundant — collapsing to a single reload was A/B-tested and REGRESSED
+    // 15 MHz from 0% to 2.4% byte-drops. The per-frame double SSE toggle is
+    // load-bearing for PL022-slave RX reliability. Do not "optimize" it away.
     if (msg.num_bytes_ >= 3) {
         panel_spi_clear_confirmation();
     }
