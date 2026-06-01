@@ -62,9 +62,15 @@ PY
     fi
 
     # NB: plain cp, not `cp -X`. macOS 15's FSKit msdos driver rejects the
-    # extended-attribute handling of `cp -X` on the RP2350 BOOTSEL volume with
-    # a spurious "Permission denied"; plain cp writes fine.
-    cp "$UF2" /Volumes/RP2350/
+    # extended-attribute handling of `cp -X` on the RP2350 BOOTSEL volume with a
+    # spurious "Permission denied". It also returns "Permission denied" on an
+    # immediate cp right after mount (volume not write-ready yet) — so retry.
+    copied=0
+    for _ in $(seq 1 20); do
+        if cp "$UF2" /Volumes/RP2350/ 2>/dev/null; then copied=1; break; fi
+        sleep 0.5
+    done
+    (( copied == 1 )) || { echo "deploy: UF2 copy to /Volumes/RP2350 failed (FSKit mount race?)" >&2; exit 1; }
     sync
     echo "deploy: flashed $PIO_ENV — panel will re-enumerate in a few seconds"
     exit 0
