@@ -14,9 +14,15 @@ at boot** — the over-the-wire PSRAM *upload* path (full V2) is out of scope.
   V-bar sweep (40–79), drifting checkerboard (80–99). 100 × 201 B ≈ 20 KB.
 - **V2 protocol** (`0x50–0x53` implicit-duty, `0x60–0x63` explicit-duty) decoded, version-gated
   per command, dispatched to a PSRAM-index handler that reuses the existing Pattern→display path.
-- **Arena side (LAB-42) NOT applied** — the `LED-Display_G6_Firmware_Arena` checkout was mid-merge
-  with unresolved conflicts when this work landed; the exact changes are specified below for
-  application on a clean tree. (LAB-42 is assigned to Frank.)
+- **HARDWARE VALIDATED (panel, v0.2.1):** the `pico_v021_psramtest` build was flashed to a real
+  panel (USB serial `F102E3C23B91549D`) on 2026-06-01 and reported
+  `PSRAM SELFTEST: 100/100 OK size=8388608 freeheap=8365572`. Slot dumps matched the catalog
+  byte-for-byte (slot 0 = row-0 H-bar `FF×10 … duty FF`; slot 99 = checker `0F/F0 … duty C0`).
+  *(A `pico_v031_psramtest` on the same board correctly reports FAIL — wrong PSRAM CS — confirming
+  the build is rev-specific.)*
+- **Arena side (LAB-42) implemented in an isolated worktree** off the arena repo's clean tip
+  (the main checkout was mid-merge). Branch `mreiser/lab-42-arena-v2-display-from-psram`; builds
+  clean (`pio run -e teensy41`); not yet hardware-tested. Changes summarized below.
 
 ## V2 wire format (the shared contract)
 
@@ -74,10 +80,13 @@ pio run -d panel_controller -e pico_controller_v031 -t upload # bench driver
 pytest panel/tools/test_psram_demo.py        # 7 passed
 ```
 
-## LAB-42 — arena handoff (apply on a clean arena tree)
+## LAB-42 — arena V2 emit (implemented; reconcile with the in-progress merge)
 
-`LED-Display_G6_Firmware_Arena` was mid-merge (unmerged `src/SpiManager.cpp`, `src/constants.h`)
-when LAB-41 landed, so these were **not** applied here. On a clean branch:
+Implemented on branch `mreiser/lab-42-arena-v2-display-from-psram`, created as an isolated
+`git worktree` off the arena repo's clean committed tip because the main checkout was mid-merge
+(unmerged `src/SpiManager.cpp`, `src/constants.h`). Builds clean (`pio run -e teensy41`). Note the
+clean tip predates the uncommitted runtime-SPI-clock / frames-sent WIP, so reconcile when that
+merge is resolved. The changes (also re-appliable from scratch):
 
 1. **`src/G6PanelProtocol.h`** — add `header_version_v2 = 0x02` / `…_with_parity = 0x82`, the
    `cmd_disp_psram_*` opcodes (0x50–0x53 / 0x60–0x63), `block_byte_count_psram = 4` /
@@ -100,8 +109,9 @@ DoD: a controller-issued V2 command drives the (locally-loaded) panel to show it
 ## Status / open items
 
 - Panel firmware + tests: **done**, builds green, host tests 7/7.
-- On-hardware visual confirmation (single board play + two-board) and the spidiag 0–99 sweep:
-  pending bench time.
+- PSRAM read-back integrity: **validated on v0.2.1 hardware** (100/100 OK, slot dumps match catalog).
+- Visual single-board play (`p`), two-board V2-over-SPI, and the spidiag 0–99 sweep: **pending bench**.
 - CIPO confirmation of the V2 echo on the real bus: inherits the LAB-39 caveat (panel CIPO not
   observed reaching the master on the single-panel bench) — re-check with the CIPO probe.
-- Arena V2 (LAB-42): specified above; **not applied** pending a clean arena checkout.
+- Arena V2 (LAB-42): **implemented** on the worktree branch, builds clean on teensy41;
+  not yet hardware-tested; reconcile with the in-progress arena merge.
