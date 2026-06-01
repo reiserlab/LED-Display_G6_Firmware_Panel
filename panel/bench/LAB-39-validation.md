@@ -93,15 +93,28 @@ so the PL022+DMA direction is sound. Gate the merge on: (a) removing the `while(
 leftover; (b) verifying CIPO via a bench probe and adding a TX-FIFO flush if the shift is
 real; (c) reconciling with the `spi-bringup-step0` fixes + test suite.
 
+## Follow-up branch `mreiser/spi-diag-txfifo` (off merged main)
+
+PR #4 was merged as-is (RX win) with the review above. The follow-up branch carries:
+- the timing-neutral silent-counter `SPI_DIAG` (replaces PR #4's serial profiler),
+- macOS support for `deploy.sh`/`monitor.sh` + `panel_port.py`,
+- the `spi_reliability.py` / `cipo_capture.py` bench harness + this writeup,
+- **the SSE-toggle TX-FIFO flush** (`spi_flush_tx_fifo()` in `panel_spi_read()`).
+
+**SSE-flush RX re-validation @ 25 MHz (v0.2.1):** GS16 38,886 and GS2 40,007 →
+`reject_any = 0`, `missed ≈ 0`. So the per-frame SSE toggle does **not** regress reception
+(settles the PR-#4-vs-`spi-bringup` disagreement in favor of the toggle). Its effect on the
+**CIPO slot** is still unconfirmed — that needs the bench probe below.
+
 ## Next steps
 1. **CIPO bench probe** — enable/scope the CS-gated CIPO return buffers (or logic-analyzer
-   the panel CIPO pin) to settle the confirmation + TX-FIFO question.
-2. **Merge our updates onto the PR** — the silent-counter SPI_DIAG + `spi_reliability.py`
-   harness (this branch, `lab-39-validate`) and the PL022 reliability work (PE03 RX-drain;
-   and the TX-FIFO flush if CIPO needs it) from `spi-bringup-step0`.
-3. Remove the `while(true)` leftover; correct the PIO/PL022 naming.
+   the panel CIPO pin) to confirm the SSE flush actually lands the confirmation at CIPO
+   bytes 0–2.
+2. **Open the follow-up PR** (`mreiser/spi-diag-txfifo`) once CIPO is confirmed (or push now
+   with the SSE flush flagged "RX-validated, CIPO pending probe").
+3. Frank-side on a future PR: remove the `while(true)` leftover; correct the PIO/PL022 naming.
 
-## Artifacts (branch `lab-39-validate`, off `origin/debug-timing`)
+## Artifacts (branch `mreiser/spi-diag-txfifo`, off merged `main`)
 - `panel/src/messenger.cpp`, `panel/src/panel_spi_custom.cpp` — silent-counter SPI_DIAG port
   + a diag-only CS-idle timeout in `panel_spi_read()`.
 - `panel/tools/spi_reliability.py` — dual-ended reliability benchmark.
