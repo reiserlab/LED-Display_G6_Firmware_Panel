@@ -4,7 +4,7 @@
 const uint32_t BAUDRATE = 115200;
 
 // SPI clock speed (Hz). Peripheral-side is permissive; this is informational on
-// the slave. Spec target is 25 MHz with margin; 30 MHz is the marginal ceiling.
+// the panel. Spec target is 25 MHz with margin; 30 MHz is the marginal ceiling.
 const uint32_t SPI_SPEED = 30000000;
 
 // EINT (external trigger) — GP45 on both v0.2.1 and v0.3.1.

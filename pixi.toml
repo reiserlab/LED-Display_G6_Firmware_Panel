@@ -1,0 +1,25 @@
+[workspace]
+authors = ["Frank Loesche <loeschef@janelia.hhmi.org>"]
+channels = ["conda-forge"]
+name = "Panel-Firmware"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+# NOTE: the deploy*/monitor* tasks below are bound to SPECIFIC physical panels
+# by USB serial number (319A5199EE357F77 = a particular v0.2.1 unit;
+# A5D4B82BA2B9FB51 = a particular v0.3.1 unit). They will only act on those two
+# boards. To deploy/monitor a DIFFERENT panel you must use its own USB serial:
+# find it with `ls /dev/serial/by-id/usb-Reiser_Lab_RP2354_20x20_Display_Panel_*`
+# then either add a new task here or call the script directly, e.g.
+#   bash panel/tools/deploy.sh <THAT_SERIAL> pico_v031
+# As written, these tasks cannot target any other hardware.
+deploy21a    = "bash panel/tools/deploy.sh 319A5199EE357F77 pico_v021"
+deploy31a  = "bash panel/tools/deploy.sh A5D4B82BA2B9FB51 pico_v031"
+deploy21a-diag = "bash panel/tools/deploy.sh 319A5199EE357F77 pico_v021_spidiag"
+deploy31a-diag = "bash panel/tools/deploy.sh A5D4B82BA2B9FB51 pico_v031_spidiag"
+monitor21a   = "bash panel/tools/monitor.sh 319A5199EE357F77"
+monitor31a = "bash panel/tools/monitor.sh A5D4B82BA2B9FB51"
+
+[dependencies]
+platformio = ">=6.1.19,<7"

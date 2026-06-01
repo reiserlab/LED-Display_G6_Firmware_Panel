@@ -497,7 +497,9 @@ void loop() {
     // other phases idle at 50 Hz to leave CPU room.
     delay(cur_idx == 5 ? 2 : 20);
 #else
+    while(true){
     messenger.update();
+    }
 #endif
 }
 

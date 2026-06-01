@@ -1,5 +1,6 @@
 #include <bitset>
 #include <algorithm>
+#include <climits>
 #include "message.h"
 
 #include <Streaming.h>
@@ -87,7 +88,6 @@ uint8_t Message::header_with_parity_for_3byte(
 {
     uint8_t v = version_byte_no_parity & 0b01111111;
     uint32_t count = 0;
-    // CHAR_BIT * sizeof(uint8_t) = 8 bits; sizeof() alone is 1 byte = LSB only.
     count += std::bitset<CHAR_BIT * sizeof(uint8_t)>(v).count();
     count += std::bitset<CHAR_BIT * sizeof(uint8_t)>(cmd).count();
     count += std::bitset<CHAR_BIT * sizeof(uint8_t)>(checksum).count();
