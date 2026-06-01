@@ -49,22 +49,38 @@ static void ensure_dma_init() {
 }
 
 // ----------------------------------------------------------------------------
-// Discard any residual RX bytes left in the FIFO and clear a sticky overrun,
-// WITHOUT disabling the peripheral. Only legal while CS is idle (high).
-//
-// We deliberately do NOT toggle the SSE (enable) bit here. Disabling and
-// re-enabling the PL022 under an idle-high MODE3 clock (CPOL=1/CPHA=1) injects
-// a one-bit phase shift into the first frame after re-enable, which corrupts
-// byte alignment and fails the parity check (observed as a PE02 glyph). The
-// peripheral stays continuously enabled — matching the known-good alignment of
-// the previous polled implementation — and we only drain leftover bytes by
-// reading them, which is a no-op in the normal case (the prior transaction's
-// RX DMA already consumed exactly num_bytes).
+// Discard any residual RX bytes left in the FIFO and clear a sticky overrun.
+// Only legal while CS is idle (high).
 // ----------------------------------------------------------------------------
 static void spi_drain_rx() {
     spi_hw_t *hw = spi_get_hw(SPI_INST);
     while (spi_is_readable(SPI_INST)) { (void)hw->dr; }
     hw->icr = SPI_SSPICR_RORIC_BITS;                // clear overrun latch
+}
+
+// ----------------------------------------------------------------------------
+// Flush the PL022 TX FIFO between transactions by momentarily disabling the SSP
+// (SSPCR1.SSE 1->0->1). Only legal while CS is idle (high).
+//
+// Why this is needed: the TX DMA is armed for MESSAGE_MAXIMUM_SIZE (300) bytes
+// but real frames are <= 203, so the DMA over-queues filler and ~8 un-clocked
+// bytes are stranded in the 8-deep TX FIFO at CS-high. dma_channel_abort() stops
+// the DMA but does NOT clear the FIFO, so on the next transaction those stale
+// bytes clock out first and shift the {header,cmd,CRC} CIPO confirmation slot.
+// Disabling SSE is the only PL022 mechanism that clears the TX FIFO.
+//
+// LAB-39 note: PR #4 avoided this toggle, fearing a one-bit MODE3 phase shift
+// (PE02) on the first frame after re-enable. The spi-bringup-step0 A/B test
+// found the OPPOSITE — a per-frame SSE toggle IMPROVED slave RX alignment. This
+// build restores it to fix the CIPO shift; RX is re-validated at 25 MHz
+// (reject ~= 0) to confirm it does not regress reception. The CIPO fix itself
+// still needs the bench probe of the shared-CIPO return path to confirm.
+// ----------------------------------------------------------------------------
+static void spi_flush_tx_fifo() {
+    spi_hw_t *hw = spi_get_hw(SPI_INST);
+    hw->cr1 &= ~SPI_SSPCR1_SSE_BITS;   // disable SSP -> clears RX + TX FIFOs
+    (void)hw->cr1;                     // read-back orders the disable before re-enable
+    hw->cr1 |=  SPI_SSPCR1_SSE_BITS;   // re-enable
 }
 
 // ----------------------------------------------------------------------------
@@ -131,7 +147,8 @@ void panel_spi_read(Message &msg) {
     // wait that burst out first.
     while (!gpio_get(SPI_CS_PIN)) { tight_loop_contents(); }
 
-    spi_drain_rx();
+    spi_flush_tx_fifo();   // clear stale TX filler so it can't shift the CIPO slot
+    spi_drain_rx();        // clear RX residue + sticky overrun latch
     arm_dma(msg.data_.data());
 
 #if SPI_DIAG
