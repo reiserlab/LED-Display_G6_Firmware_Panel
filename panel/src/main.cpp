@@ -9,6 +9,7 @@
 #include "layout.h"
 #include "display_pio.h"
 #include "predef_patterns.h"
+#include "psram_store.h"
 
 queue_t display_queue;
 queue_t error_request_queue;   // uint32_t slot indices, core 0 -> core 1
@@ -436,6 +437,92 @@ static void selftest_handle_serial() {
 #endif // STAGE2_SELFTEST
 
 
+#if PSRAM_SELFTEST
+// =======================================================================
+// PSRAM_SELFTEST mode — single-board LAB-41 validation (no SPI master).
+// Read-back-verifies the demo store at boot and prints a PASS/FAIL banner,
+// then runs a tiny serial console:
+//   p        play the animation locally (feed 0..99 into display_queue)
+//   s / x    stop playback
+//   D<n>     dump PSRAM slot n as hex (e.g. "D42")
+//   v        re-run the read-back verify
+// =======================================================================
+static bool     pst_playing = false;
+static uint16_t pst_index   = 0;
+static uint32_t pst_last_ms = 0;
+static const uint32_t PST_FRAME_MS = 33;   // ~30 fps animation cadence
+
+static void psram_selftest_verify(bool psram_ok) {
+    Serial.println();
+    Serial.println("=== LAB-41 PSRAM SELFTEST ===");
+    if (!psram_ok) {
+        Serial.println("PSRAM SELFTEST: FAIL (pmalloc/init failed)");
+        return;
+    }
+    psram_store::VerifyResult r = psram_store::verify();
+    Serial.print("PSRAM SELFTEST: ");
+    Serial.print(r.checked - r.mismatched);
+    Serial.print("/");
+    Serial.print(r.checked);
+    Serial.print(r.mismatched == 0 ? " OK" : " MISMATCH");
+    Serial.print(" size=");
+    Serial.print((uint32_t)rp2040.getPSRAMSize());
+    Serial.print(" freeheap=");
+    Serial.println((int)rp2040.getFreePSRAMHeap());
+    Serial.println("cmds: p=play s=stop D<n>=dump v=verify");
+}
+
+static void psram_selftest_dump(uint16_t idx) {
+    const uint8_t *f = psram_store::frame_ptr(idx);
+    if (!f) {
+        Serial.print("slot ");
+        Serial.print(idx);
+        Serial.println(" out of range");
+        return;
+    }
+    Serial.print("slot ");
+    Serial.print(idx);
+    Serial.print(" [");
+    Serial.print((uint32_t)psram_store::FRAME_BYTES);
+    Serial.print("B]:");
+    uint8_t xs = 0;
+    for (size_t i = 0; i < psram_store::FRAME_BYTES; i++) {
+        if (i % 16 == 0) Serial.println();
+        if (f[i] < 0x10) Serial.print('0');
+        Serial.print(f[i], HEX);
+        Serial.print(' ');
+        xs ^= f[i];
+    }
+    Serial.println();
+    Serial.print("xor8=");
+    Serial.println(xs, HEX);
+}
+
+static void psram_selftest_serial() {
+    while (Serial.available()) {
+        int c = Serial.read();
+        if      (c == 'p')             { pst_playing = true;  Serial.println("play"); }
+        else if (c == 's' || c == 'x') { pst_playing = false; Serial.println("stop"); }
+        else if (c == 'v')             { psram_selftest_verify(psram_store::ready()); }
+        else if (c == 'D')             { psram_selftest_dump((uint16_t)Serial.parseInt()); }
+    }
+}
+
+static void psram_selftest_step() {
+    psram_selftest_serial();
+    if (!pst_playing) return;
+    uint32_t now = millis();
+    if (now - pst_last_ms < PST_FRAME_MS) return;
+    pst_last_ms = now;
+    Pattern pat;
+    if (psram_store::load(pst_index, pat, DisplayMode::Persistent)) {
+        queue_try_add(&display_queue, &pat);   // drop-on-full is fine
+    }
+    pst_index = (uint16_t)((pst_index + 1) % psram_store::FRAME_COUNT);
+}
+#endif // PSRAM_SELFTEST
+
+
 void setup() {
     Serial.begin(BAUDRATE);
     queue_init(&display_queue, sizeof(Pattern), DISPLAY_QUEUE_SIZE);
@@ -451,7 +538,28 @@ void setup() {
     while (!Serial && (millis() - t0) < 2000) { /* spin briefly */ }
     selftest_banner();
 #else
+    // LAB-41: load the demo animation into PSRAM before SPI ingest comes up, so
+    // a V2 "display PSRAM index" command can be served from the first frame.
+    // pmalloc failure (no PSRAM) logs FATAL to serial but does not block boot —
+    // V1 live-display still works; V2 PSRAM commands raise PE05 at dispatch time.
+    bool psram_ok = psram_store::init();
+    if (psram_ok) {
+        psram_store::generate_demo();
+    } else {
+        Serial.println("FATAL: PSRAM store init failed; V2 PSRAM display unavailable");
+    }
+#if PSRAM_SELFTEST
+    // Single-board PSRAM validation: wait briefly for USB CDC, read-back verify,
+    // print a PASS/FAIL banner. SPI ingest is intentionally NOT started so the
+    // serial console stays responsive on a bare board.
+    {
+        uint32_t t0 = millis();
+        while (!Serial && (millis() - t0) < 2000) { /* spin briefly */ }
+        psram_selftest_verify(psram_ok);
+    }
+#else
     messenger.initialize();
+#endif
 #endif
 }
 
@@ -496,6 +604,11 @@ void loop() {
     // idx 5 needs ~500 Hz outer rate to drive Oneshot bright enough to see;
     // other phases idle at 50 Hz to leave CPU room.
     delay(cur_idx == 5 ? 2 : 20);
+#elif PSRAM_SELFTEST
+    // LAB-41 single-board console: serve serial cmds + local animation play.
+    // No SPI ingest; core 1 refreshes the queued Persistent frame at 1 kHz.
+    psram_selftest_step();
+    delay(1);
 #else
     while(true){
     messenger.update();

@@ -219,6 +219,27 @@ static void build_comm_check(uint8_t *out, size_t out_len) {
     }
 }
 
+// Helper: build a V2 "display PSRAM index N" frame (header 0x02). `cmd_id`
+// selects mode + payload shape: 0x50-0x53 (implicit duty, 2 B LE index) or
+// 0x60-0x63 (explicit duty, 2 B index + 1 B duty). The index is little-endian.
+// Parity is computed by the same Message codec the peripheral validates with.
+static void build_display_psram_index(uint8_t *out, size_t out_len,
+                                      uint16_t index, uint8_t cmd_id, int duty) {
+    Message msg;
+    bool explicit_duty = ((cmd_id & 0xF0) == 0x60);
+    size_t payload = explicit_duty ? PAYLOAD_DISPLAY_PSRAM_DUTY : PAYLOAD_DISPLAY_PSRAM;
+    msg.set_num_bytes(HEADER_SIZE + payload);
+    msg.set_header_byte(CMD_PROTOCOL_V2);
+    msg.set_command_byte(cmd_id);
+    msg.payload_at(0) = (uint8_t)(index & 0xFF);
+    msg.payload_at(1) = (uint8_t)((index >> 8) & 0xFF);
+    if (explicit_duty) msg.payload_at(2) = (uint8_t)(duty & 0xFF);
+    msg.set_parity_bit();
+    for (size_t i = 0; i < msg.num_bytes() && i < out_len; i++) {
+        out[i] = msg.data_ptr()[i];
+    }
+}
+
 
 void loop() {
     static uint32_t iter = 0;
@@ -343,6 +364,28 @@ void loop() {
         spi_xfer(tx, rx, sizeof(tx));
         Serial.print("Parity-corrupt frame -> ");
         print_cipo("", rx);  // CIPO buffer unchanged
+    }
+
+    // -- Step 8: V2 PSRAM animation (LAB-41/42) -----------------------------
+    // Stream PSRAM frame indices 0..99 (V2 Persistent, 0x51) at ~30 fps. The
+    // peripheral renders each frame from its OWN PSRAM; the wire carries only
+    // the 4-byte index command, not 201-byte pixels — the whole point of the
+    // PSRAM path. The CIPO read with each transaction carries the confirmation
+    // the peripheral armed for the PREVIOUS index (it arms for the next CS), so
+    // we just capture and print the last one.
+    {
+        uint8_t tx[HEADER_SIZE + PAYLOAD_DISPLAY_PSRAM] = {0};
+        uint8_t rx[HEADER_SIZE + PAYLOAD_DISPLAY_PSRAM] = {0};
+        Serial.println("V2 PSRAM animation: idx 0..99 @ ~30fps (Persistent 0x51)");
+        uint8_t last_cipo[3] = {0, 0, 0};
+        for (uint16_t idx = 0; idx < 100; idx++) {
+            build_display_psram_index(tx, sizeof(tx), idx,
+                                      CMD_ID_DISPLAY_PSRAM_PERSIST, -1);
+            spi_xfer(tx, rx, sizeof(tx));
+            last_cipo[0] = rx[0]; last_cipo[1] = rx[1]; last_cipo[2] = rx[2];
+            delay(33);  // ~30 fps
+        }
+        print_cipo("PSRAM anim CIPO (prev idx)", last_cipo);
     }
 
     Serial.println("--- iteration done ---");

@@ -5,7 +5,9 @@
 
 // Protocol versions (header byte bits 0..6; bit 7 is parity)
 extern const uint8_t CMD_PROTOCOL_V1;
-extern const uint8_t CMD_PROTOCOL;   // default for outgoing; firmware accepts V1 inbound only
+extern const uint8_t CMD_PROTOCOL_V2;   // PSRAM-backed display (LAB-41/42)
+extern const uint8_t CMD_PROTOCOL;   // default for outgoing V1; inbound version is
+                                     // gated per-command via command_protocol_version()
 
 // Command opcodes use low-nibble mode encoding:
 //   high nibble = pattern type (1 = 2L, 3 = 16L, 5 = PSRAM-indexed, 6 = PSRAM-w-duty-cycle,
@@ -45,16 +47,29 @@ enum CommandId: uint8_t {
     // reads the low byte and raises PE05 if upper two bytes are nonzero.
     CMD_ID_ERROR_DISPLAY            = 0xC2,
 
-    // ---- V2 reservations (specced; header 0x02/0x82) — PSRAM-backed display ----
-    //   0x0F                 — Reset PSRAM
-    //   0x3F                 — Write 16L pattern to PSRAM (16L only; no 2L PSRAM write)
-    //   0x50/0x51/0x52/0x53  — Display PSRAM index, mode in low nibble (duty_cycle
-    //                          implicit from the value stored at PSRAM-write time)
-    //   0x60/0x61/0x62/0x63  — Display PSRAM index with explicit duty_cycle byte
-    // Symbols below are placeholders; not dispatched by Messenger today.
-    CMD_ID_RESET_PSRAM       = 0x0F,
-    CMD_ID_SET_PSRAM_GRAY_16 = 0x3F,
-    CMD_ID_DISPLAY_PSRAM     = 0x50,    // Oneshot from PSRAM index (mode in low nibble)
+    // ---- V2 (header 0x02/0x82) — PSRAM-backed display (LAB-41/42) ----
+    // Display commands take a 16-bit LE PSRAM frame index as payload; the panel
+    // renders the locally-stored frame at that index. Low nibble = display mode
+    // (0 Oneshot / 1 Persistent / 2 Triggered / 3 Gated), same as V1.
+    //   0x50/0x51/0x52/0x53  — Display PSRAM index (2 B LE index). duty_cycle is
+    //                          implicit (the value stored with the frame).
+    //   0x60/0x61/0x62/0x63  — Display PSRAM index with explicit duty_cycle
+    //                          (3 B: 2 B LE index + 1 B duty_cycle).
+    // The over-the-wire PSRAM write/reset path is the full V2 (out of scope for
+    // the LAB-41 demo, which loads frames locally at boot); symbols kept for the
+    // shared opcode map but not dispatched by Messenger today.
+    CMD_ID_RESET_PSRAM                  = 0x0F,
+    CMD_ID_SET_PSRAM_GRAY_16            = 0x3F,
+
+    CMD_ID_DISPLAY_PSRAM                = 0x50,   // Oneshot     (duty implicit)
+    CMD_ID_DISPLAY_PSRAM_PERSIST        = 0x51,   // Persistent  (duty implicit)
+    CMD_ID_DISPLAY_PSRAM_TRIGGERED      = 0x52,   // Triggered   (duty implicit)
+    CMD_ID_DISPLAY_PSRAM_GATED          = 0x53,   // Gated       (duty implicit)
+
+    CMD_ID_DISPLAY_PSRAM_DUTY           = 0x60,   // Oneshot     (explicit duty)
+    CMD_ID_DISPLAY_PSRAM_DUTY_PERSIST   = 0x61,   // Persistent  (explicit duty)
+    CMD_ID_DISPLAY_PSRAM_DUTY_TRIGGERED = 0x62,   // Triggered   (explicit duty)
+    CMD_ID_DISPLAY_PSRAM_DUTY_GATED     = 0x63,   // Gated       (explicit duty)
 
     // ---- V3 reservations (specced; header 0x03/0x83) — diagnostics + predefined patterns ----
     //   0x02                 — Query diagnostics (data shape TBD)
@@ -74,8 +89,17 @@ extern const size_t PAYLOAD_MINIMUM_SIZE;
 extern const size_t PAYLOAD_COMMS_CHECK;
 extern const size_t PAYLOAD_DISPLAY_GRAY_2;
 extern const size_t PAYLOAD_DISPLAY_GRAY_16;
-extern const size_t PAYLOAD_ERROR_DISPLAY;   // 3 B: 24-bit LE slot index (V3 0x70-compatible)
+extern const size_t PAYLOAD_ERROR_DISPLAY;       // 3 B: 24-bit LE slot index (V3 0x70-compatible)
+extern const size_t PAYLOAD_DISPLAY_PSRAM;       // 2 B: 16-bit LE PSRAM frame index
+extern const size_t PAYLOAD_DISPLAY_PSRAM_DUTY;  // 3 B: 16-bit LE index + 1 B duty_cycle
 extern const size_t MESSAGE_MINIMUM_SIZE;
+
+// Per-command protocol version (header bits 0..6) that an opcode belongs to.
+// V1 display/comms/error opcodes -> 1; V2 PSRAM opcodes -> 2. Unknown opcodes
+// default to V1 so a bogus opcode under a V2 header fails the version gate and
+// a bogus opcode under a V1 header still surfaces as unknown-cmd. Messenger
+// gates each inbound message on header_version == command_protocol_version(cmd).
+uint8_t command_protocol_version(uint8_t cmd);
 
 using PayloadSizeUMap = std::unordered_map<uint8_t, size_t>;
 extern const PayloadSizeUMap PAYLOAD_SIZE_UMAP;

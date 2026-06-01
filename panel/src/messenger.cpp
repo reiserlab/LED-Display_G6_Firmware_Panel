@@ -6,6 +6,7 @@
 #include "panel_spi_custom.h"
 #include "predef_patterns.h"
 #include "predef_patterns_table.h"
+#include "psram_store.h"
 #include "display.h"
 #include "protocol.h"
 #include <Streaming.h>
@@ -36,6 +37,17 @@ uint32_t diag_cmd_hist[256] = {0};
 DiagFail diag_ring[DIAG_RING];
 size_t   diag_ring_head = 0, diag_ring_count = 0;
 
+// V2 PSRAM-display reception accounting (LAB-41/42). A streamed 0..99 run
+// should land cmds==total, oor==0, and distinct==FRAME_COUNT with reject_any==0.
+uint32_t diag_psram_cmds = 0, diag_psram_oor = 0;
+uint16_t diag_psram_idx_min = 0xFFFF, diag_psram_idx_max = 0;
+uint32_t diag_psram_idx_hist[psram_store::FRAME_COUNT] = {0};
+
+inline bool diag_is_psram_display_cmd(uint8_t cmd) {
+    return (cmd >= CMD_ID_DISPLAY_PSRAM      && cmd <= CMD_ID_DISPLAY_PSRAM_GATED) ||
+           (cmd >= CMD_ID_DISPLAY_PSRAM_DUTY && cmd <= CMD_ID_DISPLAY_PSRAM_DUTY_GATED);
+}
+
 uint16_t diag_expected_len(uint8_t cmd) {
     auto it = PAYLOAD_SIZE_UMAP.find(cmd);
     return (it != PAYLOAD_SIZE_UMAP.end()) ? (uint16_t)(it->second + HEADER_SIZE) : 0;
@@ -51,6 +63,9 @@ void diag_reset() {
     diag_parity_fail = diag_length_fail = diag_protocol_fail = diag_unknown_cmd = 0;
     diag_ring_head = diag_ring_count = 0;
     for (int i = 0; i < 256; i++) diag_cmd_hist[i] = 0;
+    diag_psram_cmds = diag_psram_oor = 0;
+    diag_psram_idx_min = 0xFFFF; diag_psram_idx_max = 0;
+    for (uint16_t i = 0; i < psram_store::FRAME_COUNT; i++) diag_psram_idx_hist[i] = 0;
 }
 inline void diag_emit(const char *b, int n) {
     if (n > 0) Serial.write(reinterpret_cast<const uint8_t *>(b),
@@ -76,6 +91,17 @@ void diag_dump() {
             diag_emit(b, snprintf(b, sizeof(b), " 0x%02X=%lu", c,
                                   (unsigned long)diag_cmd_hist[c]));
     Serial.write(reinterpret_cast<const uint8_t *>("\r\n"), 2);
+    // V2 PSRAM reception summary (only meaningful once V2 traffic has run).
+    if (diag_psram_cmds || diag_psram_oor) {
+        unsigned distinct = 0;
+        for (uint16_t i = 0; i < psram_store::FRAME_COUNT; i++)
+            if (diag_psram_idx_hist[i]) distinct++;
+        diag_emit(b, snprintf(b, sizeof(b),
+            "psram: cmds=%lu oor=%lu idx=[%u..%u] distinct=%u/%u\r\n",
+            (unsigned long)diag_psram_cmds, (unsigned long)diag_psram_oor,
+            (unsigned)(diag_psram_cmds ? diag_psram_idx_min : 0),
+            (unsigned)diag_psram_idx_max, distinct, (unsigned)psram_store::FRAME_COUNT));
+    }
     diag_emit(b, snprintf(b, sizeof(b),
         "last %u fails (cmd got/exp PLRU):\r\n", (unsigned)diag_ring_count));
     for (size_t i = 0; i < diag_ring_count; i++) {
@@ -160,6 +186,26 @@ Messenger::Messenger(queue_t &display_queue, queue_t &error_request_queue)
             [this](Message &msg){this -> on_cmd_error_display(msg);}
     });
 
+    // V2 (header 0x02/0x82) PSRAM display. All eight opcodes share one handler;
+    // it derives mode from the low nibble and explicit-vs-implicit duty from the
+    // high nibble (0x5x implicit / 0x6x explicit).
+    cmd_umap_.insert( { CMD_ID_DISPLAY_PSRAM,
+            [this](Message &msg){this -> on_cmd_display_psram(msg);} });
+    cmd_umap_.insert( { CMD_ID_DISPLAY_PSRAM_PERSIST,
+            [this](Message &msg){this -> on_cmd_display_psram(msg);} });
+    cmd_umap_.insert( { CMD_ID_DISPLAY_PSRAM_TRIGGERED,
+            [this](Message &msg){this -> on_cmd_display_psram(msg);} });
+    cmd_umap_.insert( { CMD_ID_DISPLAY_PSRAM_GATED,
+            [this](Message &msg){this -> on_cmd_display_psram(msg);} });
+    cmd_umap_.insert( { CMD_ID_DISPLAY_PSRAM_DUTY,
+            [this](Message &msg){this -> on_cmd_display_psram(msg);} });
+    cmd_umap_.insert( { CMD_ID_DISPLAY_PSRAM_DUTY_PERSIST,
+            [this](Message &msg){this -> on_cmd_display_psram(msg);} });
+    cmd_umap_.insert( { CMD_ID_DISPLAY_PSRAM_DUTY_TRIGGERED,
+            [this](Message &msg){this -> on_cmd_display_psram(msg);} });
+    cmd_umap_.insert( { CMD_ID_DISPLAY_PSRAM_DUTY_GATED,
+            [this](Message &msg){this -> on_cmd_display_psram(msg);} });
+
 }
 
 void Messenger::initialize() {
@@ -208,11 +254,14 @@ void Messenger::update() {
     // error-raise decision all see a consistent view.
     bool err_active = Display::error_display_active;
 
+    uint8_t cmd_id   = msg.command_byte();
     bool parity_ok   = msg.check_parity();
     bool length_ok   = msg.check_length();
-    bool protocol_ok = msg.check_protocol(CMD_PROTOCOL);
+    // Version gate is per-command: V1 opcodes require a V1 header, V2 PSRAM
+    // opcodes require a V2 header (command_protocol_version()). A V2 opcode
+    // under a V1 header (or vice-versa) fails here and raises PE04.
+    bool protocol_ok = msg.check_protocol(command_protocol_version(cmd_id));
     bool cmd_ok      = false;
-    uint8_t cmd_id   = msg.command_byte();
     if (parity_ok && length_ok && protocol_ok && !err_active) {
         if (cmd_umap_.count(cmd_id) > 0) {
             cmd_umap_.at(cmd_id)(msg);
@@ -235,6 +284,22 @@ void Messenger::update() {
             diag_unknown_cmd++; flags |= 8;
         }
         if (flags) { diag_reject_any++; diag_record(cmd_id, (uint16_t)msg.num_bytes(), flags); }
+
+        // V2 PSRAM index accounting — only for well-formed (wire-valid) frames.
+        // Out-of-range indices are an application-level reject (PE05), tracked
+        // separately from reject_any so a clean 0..99 run reads oor=0.
+        if (flags == 0 && diag_is_psram_display_cmd(cmd_id)) {
+            uint16_t idx = (uint16_t)msg.payload_at(0)
+                         | ((uint16_t)msg.payload_at(1) << 8);
+            diag_psram_cmds++;
+            if (idx < psram_store::FRAME_COUNT) {
+                diag_psram_idx_hist[idx]++;
+                if (idx < diag_psram_idx_min) diag_psram_idx_min = idx;
+                if (idx > diag_psram_idx_max) diag_psram_idx_max = idx;
+            } else {
+                diag_psram_oor++;
+            }
+        }
     }
 #endif
 
@@ -330,6 +395,34 @@ void Messenger::on_cmd_display_gray_2(Message &msg) {
 void Messenger::on_cmd_display_gray_16(Message &msg) {
     bool err = false;
     msg.to_pattern(pat_, err);
+    if (!queue_try_add(&display_queue_, &pat_)) {
+        queue_drops_++;
+    }
+}
+
+
+void Messenger::on_cmd_display_psram(Message &msg) {
+    // V2 PSRAM display. Payload is a 16-bit LE frame index; the 0x6x variants
+    // append an explicit duty_cycle byte. Mode comes from the command's low
+    // nibble (0 Oneshot / 1 Persistent / 2 Triggered / 3 Gated). The frame is
+    // read from PSRAM, decoded into pat_, and queued for core 1 — identical
+    // downstream path to a V1 live Gray_16 frame.
+    uint8_t cmd = msg.command_byte();
+    DisplayMode mode = (DisplayMode)(cmd & 0x0F);
+
+    uint16_t index = (uint16_t)msg.payload_at(0)
+                   | ((uint16_t)msg.payload_at(1) << 8);
+
+    int duty_override = -1;
+    if ((cmd & 0xF0) == 0x60) {
+        duty_override = (int)msg.payload_at(2);
+    }
+
+    if (!psram_store::load(index, pat_, mode, duty_override)) {
+        // Out-of-range index / store unavailable → invalid-index panel error.
+        raise_error(PREDEF_SLOT_PE05);
+        return;
+    }
     if (!queue_try_add(&display_queue_, &pat_)) {
         queue_drops_++;
     }
