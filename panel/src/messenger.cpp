@@ -7,15 +7,97 @@
 #include "predef_patterns.h"
 #include "predef_patterns_table.h"
 #include "display.h"
+#include "protocol.h"
 #include <Streaming.h>
+#include <cstdio>
 
 // S2.2: Display lives in main.cpp; we read frames_skipped_ for the heartbeat.
 extern Display display;
 
-// Build with -DSPI_DIAG=1 to enable the SPI timing + validity-gate serial
-// diagnostics in update() (per-1000-message histograms and a parity dump).
-// Off by default: the diagnostics do blocking Serial work on core 0 and can
-// cost the occasional frame.
+
+#if SPI_DIAG
+// ---------------------------------------------------------------------------
+// SPI_DIAG — silent reception diagnostics (build flag -DSPI_DIAG=1).
+//
+// LAB-39 harness: ported from the polled spi-bringup-step0 path onto Frank's
+// PL022+DMA path so reject rate can be measured with production-identical
+// streaming timing. Counters are cheap in-RAM increments and there is NO
+// serial output while streaming. 'd' dumps the whole picture in one burst;
+// 'z' zeros the window. The 'sent vs received' denominator comes from the
+// arena master's frames-sent counter (driven over its own serial port).
+// ---------------------------------------------------------------------------
+namespace {
+struct DiagFail { uint8_t cmd; uint16_t got; uint16_t expected; uint8_t flags; };
+// flags: bit0=parity bit1=length bit2=protocol bit3=unknown-cmd
+constexpr size_t DIAG_RING = 32;
+uint32_t diag_msgs = 0, diag_reject_any = 0;
+uint32_t diag_parity_fail = 0, diag_length_fail = 0, diag_protocol_fail = 0, diag_unknown_cmd = 0;
+uint32_t diag_cmd_hist[256] = {0};
+DiagFail diag_ring[DIAG_RING];
+size_t   diag_ring_head = 0, diag_ring_count = 0;
+
+uint16_t diag_expected_len(uint8_t cmd) {
+    auto it = PAYLOAD_SIZE_UMAP.find(cmd);
+    return (it != PAYLOAD_SIZE_UMAP.end()) ? (uint16_t)(it->second + HEADER_SIZE) : 0;
+}
+void diag_record(uint8_t cmd, uint16_t got, uint8_t flags) {
+    DiagFail &f = diag_ring[diag_ring_head];
+    f.cmd = cmd; f.got = got; f.expected = diag_expected_len(cmd); f.flags = flags;
+    diag_ring_head = (diag_ring_head + 1) % DIAG_RING;
+    if (diag_ring_count < DIAG_RING) diag_ring_count++;
+}
+void diag_reset() {
+    diag_msgs = diag_reject_any = 0;
+    diag_parity_fail = diag_length_fail = diag_protocol_fail = diag_unknown_cmd = 0;
+    diag_ring_head = diag_ring_count = 0;
+    for (int i = 0; i < 256; i++) diag_cmd_hist[i] = 0;
+}
+inline void diag_emit(const char *b, int n) {
+    if (n > 0) Serial.write(reinterpret_cast<const uint8_t *>(b),
+                            (size_t)(n < (int)160 ? n : 159));
+}
+// Blocking burst — only ever runs on an explicit 'd', never during the
+// measurement window, so blocking on the USB-CDC FIFO is fine here.
+void diag_dump() {
+    char b[160];
+    diag_emit(b, snprintf(b, sizeof(b),
+        "\r\n=== SPI_DIAG (PANEL_REV=%d) ===\r\n", (int)PANEL_REV));
+    unsigned long pml = diag_msgs
+        ? (unsigned long)((uint64_t)diag_reject_any * 1000u / diag_msgs) : 0;
+    diag_emit(b, snprintf(b, sizeof(b), "msgs=%lu reject_any=%lu (%lu.%lu%%)\r\n",
+        (unsigned long)diag_msgs, (unsigned long)diag_reject_any, pml / 10, pml % 10));
+    diag_emit(b, snprintf(b, sizeof(b),
+        "parity_fail=%lu length_fail=%lu protocol_fail=%lu unknown_cmd=%lu\r\n",
+        (unsigned long)diag_parity_fail, (unsigned long)diag_length_fail,
+        (unsigned long)diag_protocol_fail, (unsigned long)diag_unknown_cmd));
+    diag_emit(b, snprintf(b, sizeof(b), "cmd_hist:"));
+    for (int c = 0; c < 256; c++)
+        if (diag_cmd_hist[c])
+            diag_emit(b, snprintf(b, sizeof(b), " 0x%02X=%lu", c,
+                                  (unsigned long)diag_cmd_hist[c]));
+    Serial.write(reinterpret_cast<const uint8_t *>("\r\n"), 2);
+    diag_emit(b, snprintf(b, sizeof(b),
+        "last %u fails (cmd got/exp PLRU):\r\n", (unsigned)diag_ring_count));
+    for (size_t i = 0; i < diag_ring_count; i++) {
+        size_t idx = (diag_ring_head + DIAG_RING - diag_ring_count + i) % DIAG_RING;
+        const DiagFail &f = diag_ring[idx];
+        diag_emit(b, snprintf(b, sizeof(b), "  0x%02X got=%u exp=%u %c%c%c%c\r\n",
+            f.cmd, f.got, f.expected,
+            (f.flags & 1) ? 'P' : '.', (f.flags & 2) ? 'L' : '.',
+            (f.flags & 4) ? 'R' : '.', (f.flags & 8) ? 'U' : '.'));
+    }
+    Serial.write(reinterpret_cast<const uint8_t *>("=== end ===\r\n"), 13);
+}
+// Service one-shot host commands (input only, no TX): 'd' dump, 'z' zero.
+void diag_service_commands() {
+    while (Serial.available()) {
+        int c = Serial.read();
+        if      (c == 'd') diag_dump();
+        else if (c == 'z') diag_reset();
+    }
+}
+} // namespace
+#endif
 
 Messenger::Messenger(queue_t &display_queue, queue_t &error_request_queue)
     : display_queue_(display_queue),
@@ -104,52 +186,19 @@ void Messenger::update() {
 
     static Message msg;
 
-#if SPI_DIAG
-    // Wall-clock gap between consecutive update() entries: detects when
-    // post-receive processing spills past the controller's inter-frame window.
-    static uint64_t t_last_enter = 0;
-    static uint32_t gap_bins[6] = {0};   // <1, <2, <4, <8, <16, >=16 ms
-    static uint32_t gap_max_us  = 0;
-    uint64_t t_enter = time_us_64();
-    if (t_last_enter != 0) {
-        uint32_t gap_us = (uint32_t)(t_enter - t_last_enter);
-        if      (gap_us <  1000) gap_bins[0]++;
-        else if (gap_us <  2000) gap_bins[1]++;
-        else if (gap_us <  4000) gap_bins[2]++;
-        else if (gap_us <  8000) gap_bins[3]++;
-        else if (gap_us < 16000) gap_bins[4]++;
-        else                     gap_bins[5]++;
-        if (gap_us > gap_max_us) gap_max_us = gap_us;
-    }
-    t_last_enter = t_enter;
-
-    uint64_t t_spi_start = time_us_64();
-#endif
-
     panel_spi_read(msg);
 
 #if SPI_DIAG
-    // Time inside panel_spi_read, bucketed by received length so a full frame
-    // (n==203) is distinguishable from a short / overflow capture (n==8).
-    static uint32_t spi_bins_n203[6] = {0};
-    static uint32_t spi_bins_n8  [6] = {0};
-    static uint32_t spi_bins_oth [6] = {0};
-    {
-        uint32_t spi_us = (uint32_t)(time_us_64() - t_spi_start);
-        uint32_t *bins = (msg.num_bytes() == 203) ? spi_bins_n203
-                       : (msg.num_bytes() ==   8) ? spi_bins_n8
-                                                  : spi_bins_oth;
-        if      (spi_us <  1000) bins[0]++;
-        else if (spi_us <  2000) bins[1]++;
-        else if (spi_us <  4000) bins[2]++;
-        else if (spi_us <  8000) bins[3]++;
-        else if (spi_us < 16000) bins[4]++;
-        else                     bins[5]++;
+    // Idle: panel_spi_read() hit its diag-only CS-idle timeout and returned 0
+    // bytes (master between bursts). Service 'd'/'z' and return WITHOUT counting
+    // so idle reads never pollute the window and the commands work between
+    // bursts. (Never fires during streaming — there is always a transaction.)
+    if (msg.num_bytes() == 0) {
+        diag_service_commands();
+        return;
     }
-
-    uint64_t t_post_recv_start = time_us_64();
-    msg_count_ += 1;
 #endif
+    msg_count_ += 1;
 
     // Reset the COMM_CHECK byte-validation flag each message so it can't carry
     // across non-COMM_CHECK messages.
@@ -170,6 +219,24 @@ void Messenger::update() {
             cmd_ok = true;
         }
     }
+
+#if SPI_DIAG
+    // Silent per-message accounting. Count each failing check INDEPENDENTLY (a
+    // dropped-bytes frame fails both parity and length — record both, not just
+    // the first-wins gate the error-raise below picks).
+    {
+        diag_msgs++;
+        diag_cmd_hist[cmd_id]++;
+        uint8_t flags = 0;
+        if (!parity_ok)   { diag_parity_fail++;   flags |= 1; }
+        if (!length_ok)   { diag_length_fail++;   flags |= 2; }
+        if (!protocol_ok) { diag_protocol_fail++; flags |= 4; }
+        if (parity_ok && length_ok && protocol_ok && cmd_umap_.count(cmd_id) == 0) {
+            diag_unknown_cmd++; flags |= 8;
+        }
+        if (flags) { diag_reject_any++; diag_record(cmd_id, (uint16_t)msg.num_bytes(), flags); }
+    }
+#endif
 
     // Raise a PE code on the first failing gate (parity > length > protocol >
     // unknown opcode). Suppressed while an error glyph is already showing.
@@ -203,84 +270,10 @@ void Messenger::update() {
     }
 
 #if SPI_DIAG
-    static uint32_t proc_bins[6] = {0};
-    static uint32_t proc_max_us  = 0;
-    {
-        uint32_t proc_us = (uint32_t)(time_us_64() - t_post_recv_start);
-        if      (proc_us <  1000) proc_bins[0]++;
-        else if (proc_us <  2000) proc_bins[1]++;
-        else if (proc_us <  4000) proc_bins[2]++;
-        else if (proc_us <  8000) proc_bins[3]++;
-        else if (proc_us < 16000) proc_bins[4]++;
-        else                      proc_bins[5]++;
-        if (proc_us > proc_max_us) proc_max_us = proc_us;
-    }
-
-    // Terse single-line histograms + last-frame gate state every 1000 msgs.
-    // Bins are cumulative across the run; read deltas between prints.
-    if (msg_count_ % 1000 == 0) {
-        Serial.print("gap_us [<1k <2k <4k <8k <16k >=16k]: ");
-        for (int i = 0; i < 6; i++) { Serial.print(gap_bins[i]);  Serial.print(' '); }
-        Serial.print(" max="); Serial.println(gap_max_us);
-
-        Serial.print("proc_us[<1k <2k <4k <8k <16k >=16k]: ");
-        for (int i = 0; i < 6; i++) { Serial.print(proc_bins[i]); Serial.print(' '); }
-        Serial.print(" max="); Serial.println(proc_max_us);
-
-        Serial.print("spi_us n=203 ");
-        for (int i = 0; i < 6; i++) { Serial.print(spi_bins_n203[i]); Serial.print(' '); }
-        Serial.println();
-        Serial.print("spi_us n=  8 ");
-        for (int i = 0; i < 6; i++) { Serial.print(spi_bins_n8[i]); Serial.print(' '); }
-        Serial.println();
-        Serial.print("spi_us n=oth ");
-        for (int i = 0; i < 6; i++) { Serial.print(spi_bins_oth[i]); Serial.print(' '); }
-        Serial.print(" last_n=");
-        Serial.println(msg.num_bytes());
-
-        Serial.print("gate p/l/pr/cmd/cc=");
-        Serial.print(parity_ok);   Serial.print('/');
-        Serial.print(length_ok);   Serial.print('/');
-        Serial.print(protocol_ok); Serial.print('/');
-        Serial.print(cmd_ok);      Serial.print('/');
-        Serial.print(comm_check_ok_);
-        Serial.print("  hdr=0x");  Serial.print(msg.header_byte(), HEX);
-        Serial.print(" cmd=0x");   Serial.print(msg.command_byte(), HEX);
-        Serial.print("  b[0..5]=");
-        for (size_t i = 0; i < 6 && i < msg.num_bytes(); i++) {
-            uint8_t b = msg.data_ptr()[i];
-            if (b < 0x10) Serial.print('0');
-            Serial.print(b, HEX); Serial.print(' ');
-        }
-        Serial.print(" qdrop=");   Serial.print(queue_drops_);
-        Serial.print(" fskip=");   Serial.print(display.frames_skipped());
-        Serial.print(" errD/S=");  Serial.print(error_displayed_count_);
-        Serial.print('/');         Serial.println(error_suppressed_count_);
-
-        // On a parity miss, show the panel's computed parity vs the received
-        // bit and which payload bytes differ from the all-0xFF "All On" frame.
-        if (!parity_ok) {
-            uint8_t *d = msg.data_ptr();
-            size_t   n = msg.num_bytes();
-            size_t   non_ff = 0, first_bad = SIZE_MAX; uint8_t first_bad_val = 0;
-            for (size_t i = 2; i < n; i++) {
-                if (d[i] != 0xFF) {
-                    if (first_bad == SIZE_MAX) { first_bad = i; first_bad_val = d[i]; }
-                    non_ff++;
-                }
-            }
-            Serial.print("  PARITY calc=");  Serial.print(msg.calculate_parity_bit());
-            Serial.print(" recv_bit=");      Serial.print(msg.parity_bit());
-            Serial.print(" n=");             Serial.print((uint32_t)n);
-            Serial.print(" payload_non0xFF="); Serial.print((uint32_t)non_ff);
-            if (first_bad != SIZE_MAX) {
-                Serial.print(" first_bad@");  Serial.print((uint32_t)first_bad);
-                Serial.print("=0x");          Serial.print(first_bad_val, HEX);
-            }
-            Serial.print(" last@");           Serial.print((uint32_t)(n - 1));
-            Serial.print("=0x");              Serial.println(d[n - 1], HEX);
-        }
-    }
+    // Stay SILENT during streaming (no TX). Service the one-shot 'd' (dump) /
+    // 'z' (zero) host commands between transactions — reading input adds no SPI
+    // traffic, so the measurement window's timing is production-identical.
+    diag_service_commands();
 #endif
 }
 

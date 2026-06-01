@@ -134,7 +134,26 @@ void panel_spi_read(Message &msg) {
     spi_drain_rx();
     arm_dma(msg.data_.data());
 
+#if SPI_DIAG
+    // Diag build only: bound the wait for CS-low so Messenger::update() can
+    // service the 'd'/'z' host commands while the master is idle between bursts.
+    // A 0-byte return is treated as "idle, not a message" by the diag counter.
+    // Production blocks indefinitely (no serial servicing on the hot path).
+    {
+        uint32_t t0 = time_us_32();
+        while (gpio_get(SPI_CS_PIN)) {                         // CS falling: start
+            if ((uint32_t)(time_us_32() - t0) > 50000u) {      // 50 ms idle timeout
+                dma_channel_abort(rx_dma_chan_);
+                dma_channel_abort(tx_dma_chan_);
+                msg.num_bytes_ = 0;
+                return;
+            }
+            tight_loop_contents();
+        }
+    }
+#else
     while (gpio_get(SPI_CS_PIN))  { tight_loop_contents(); }   // CS falling: start
+#endif
     while (!gpio_get(SPI_CS_PIN)) { tight_loop_contents(); }   // CS rising: end
 
     // Let the final byte propagate shift-reg -> RX FIFO -> DMA. The controller's
