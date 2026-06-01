@@ -14,15 +14,22 @@ at boot** — the over-the-wire PSRAM *upload* path (full V2) is out of scope.
   V-bar sweep (40–79), drifting checkerboard (80–99). 100 × 201 B ≈ 20 KB.
 - **V2 protocol** (`0x50–0x53` implicit-duty, `0x60–0x63` explicit-duty) decoded, version-gated
   per command, dispatched to a PSRAM-index handler that reuses the existing Pattern→display path.
-- **HARDWARE VALIDATED (panel, v0.2.1):** the `pico_v021_psramtest` build was flashed to a real
-  panel (USB serial `F102E3C23B91549D`) on 2026-06-01 and reported
-  `PSRAM SELFTEST: 100/100 OK size=8388608 freeheap=8365572`. Slot dumps matched the catalog
-  byte-for-byte (slot 0 = row-0 H-bar `FF×10 … duty FF`; slot 99 = checker `0F/F0 … duty C0`).
-  *(A `pico_v031_psramtest` on the same board correctly reports FAIL — wrong PSRAM CS — confirming
-  the build is rev-specific.)*
-- **Arena side (LAB-42) implemented in an isolated worktree** off the arena repo's clean tip
-  (the main checkout was mid-merge). Branch `mreiser/lab-42-arena-v2-display-from-psram`; builds
-  clean (`pio run -e teensy41`); not yet hardware-tested. Changes summarized below.
+- **HARDWARE VALIDATED — single board (panel, v0.2.1):** `pico_v021_psramtest` flashed to a real
+  panel (USB serial `F102E3C23B91549D`) 2026-06-01 → `PSRAM SELFTEST: 100/100 OK size=8388608
+  freeheap=8365572`. Slot dumps matched the catalog byte-for-byte (slot 0 = row-0 H-bar `FF×10 …
+  duty FF`; slot 99 = checker `0F/F0 … duty C0`). *(A `pico_v031_psramtest` on the same board
+  correctly reports FAIL — wrong PSRAM CS — confirming the build is rev-specific.)*
+- **HARDWARE VALIDATED — full arena→panel over SPI:** arena Teensy flashed with the LAB-42 build,
+  panel with `pico_v021_spidiag`, driven by `scripts/psram_demo_drive.py --play 0 100 30`
+  (2026-06-01). Panel SPI_DIAG over a ~4.5 s window:
+  `msgs=1350 reject_any=0`, `parity/length/protocol/unknown = 0`, `cmd_hist: 0x51=1350`,
+  `psram: cmds=1350 oor=0 idx=[0..99] distinct=100/100`. So the arena emits V2, the panel receives
+  it at 25 MHz with 0 rejects, the per-command version gate accepts header 0x02 + 0x51, and all 100
+  PSRAM frames are delivered. **LAB-41 + LAB-42 proven together on a single panel = the LAB-48
+  prerequisite.** (Arena retransmits ~300 Hz; index advances at the 30 fps play rate.)
+- **Arena side (LAB-42)** implemented in an isolated worktree off the arena repo's clean tip
+  (main checkout was mid-merge). Branch `mreiser/lab-42-arena-v2-display-from-psram`; builds clean
+  (`pio run -e teensy41`); host driver `scripts/psram_demo_drive.py`. Changes summarized below.
 
 ## V2 wire format (the shared contract)
 
@@ -110,8 +117,9 @@ DoD: a controller-issued V2 command drives the (locally-loaded) panel to show it
 
 - Panel firmware + tests: **done**, builds green, host tests 7/7.
 - PSRAM read-back integrity: **validated on v0.2.1 hardware** (100/100 OK, slot dumps match catalog).
-- Visual single-board play (`p`), two-board V2-over-SPI, and the spidiag 0–99 sweep: **pending bench**.
-- CIPO confirmation of the V2 echo on the real bus: inherits the LAB-39 caveat (panel CIPO not
-  observed reaching the master on the single-panel bench) — re-check with the CIPO probe.
-- Arena V2 (LAB-42): **implemented** on the worktree branch, builds clean on teensy41;
-  not yet hardware-tested; reconcile with the in-progress arena merge.
+- Arena→panel V2 over SPI: **validated on hardware** (1350 cmds, reject_any=0, distinct=100/100).
+- Arena V2 (LAB-42): **implemented + hardware-tested**; reconcile the worktree branch with the
+  in-progress arena merge (it branches off the clean tip, predating the SPI-clock/frames-sent WIP).
+- Still open: explicit visual capture (camera/photodiode) and CIPO echo of the V2 confirmation on
+  the real bus (inherits the LAB-39 caveat — panel CIPO not observed reaching the master on the
+  single-panel bench; re-check with the CIPO probe).
