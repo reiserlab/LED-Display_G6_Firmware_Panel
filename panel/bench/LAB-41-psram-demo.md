@@ -87,6 +87,31 @@ pio run -d panel_controller -e pico_controller_v031 -t upload # bench driver
 pytest panel/tools/test_psram_demo.py        # 7 passed
 ```
 
+## Measured V2 command rate (hardware, v0.2.1 panel + Teensy arena, 25 MHz)
+
+Swept the arena transmit (refresh) rate; counted V2 commands the panel framed cleanly
+(`psram_demo_drive.py` PSRAM_PLAY with fps high so the index always advances, panel
+`pico_v021_spidiag` `z`/`d` over a ~1.5 s window):
+
+| arena refresh | recv/s (measured) | reject | note |
+|--------------:|------------------:|-------:|------|
+| 500 Hz   | 500   | 0 | exact, clean |
+| 1000 Hz  | 1000  | 0 | exact, clean |
+| 2000 Hz  | ~2000 | 1 | knee — still ~clean (0.03%) |
+| 4000 Hz  | ~2100 | 1 | plateau — can't deliver faster |
+| 8000 Hz  | ~2900 | 5 | over-driven |
+| 16000 Hz | ~3400 | 8 | saturated |
+
+- **Clean delivery over SPI: ~2 kHz.** Below ~2 kHz the panel receives exactly the commanded
+  rate, reject 0. Past ~2 kHz the rate plateaus (~2–3 k/s) and rejects creep in — saturation of
+  the arena's full-frame transmit (20-panel fan-out, 10 CS pairs/tick) + the panel's per-
+  transaction turnaround. Addressing only the target panel would be ~10× faster.
+- **Visible distinct frames: ~1 kHz** — the BCM display scan is fixed at ~1 ms, so a new frame
+  renders at most once per scan; drain-to-latest drops anything faster. **Animation ceiling ≈ 1 kHz,
+  display-bound**, with ~2× headroom on the command path. PSRAM read (~5–6 µs/frame) is never the
+  bottleneck. (The `distinct` column in the raw sweep tracked the fps/refresh ratio exactly,
+  confirming the index math rather than a limit.)
+
 ## LAB-42 — arena V2 emit (implemented; reconcile with the in-progress merge)
 
 Implemented on branch `mreiser/lab-42-arena-v2-display-from-psram`, created as an isolated
