@@ -14,6 +14,9 @@ version = "0.1.0"
 # then either add a new task here or call the script directly, e.g.
 #   bash panel/tools/deploy.sh <THAT_SERIAL> pico_v031
 # As written, these tasks cannot target any other hardware.
+# deploy21 is NOT serial-bound: it flashes pico_v021 to whatever single RP2350
+# PlatformIO/picotool auto-detects. Use it when only one board is connected.
+deploy21     = "pio run -d panel -e pico_v021 -t upload"
 deploy21a    = "bash panel/tools/deploy.sh 319A5199EE357F77 pico_v021"
 deploy31a  = "bash panel/tools/deploy.sh A5D4B82BA2B9FB51 pico_v031"
 deploy21a-diag = "bash panel/tools/deploy.sh 319A5199EE357F77 pico_v021_spidiag"

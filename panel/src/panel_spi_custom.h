@@ -20,4 +20,10 @@ void panel_spi_arm_confirmation(uint8_t header, uint8_t cmd, uint8_t checksum);
 // successful CIPO transmission (>= 3 bytes clocked, per spec).
 void panel_spi_clear_confirmation();
 
+#if SPI_DIAG
+// Copy the currently-armed 3-byte CIPO confirmation (tx_buf_[0..2]) for the
+// SPI_DIAG heartbeat, so the intended reply can be compared against the wire.
+void panel_spi_debug_tx(uint8_t out[3]);
+#endif
+
 #endif

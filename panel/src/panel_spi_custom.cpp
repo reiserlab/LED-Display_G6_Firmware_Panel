@@ -7,19 +7,26 @@
 #include "panel_spi_custom.h"
 
 // ----------------------------------------------------------------------------
-// DMA-paced SPI peripheral RX/TX.
+// SPI peripheral: DMA-paced RX, direct-FIFO TX.
 //
-// Two DMA channels driven off the SPI DREQs move bytes in hardware, so
-// reception is immune to core-0 processing latency within a burst (the polled
-// predecessor lost bytes when core 0 entered the read loop late and the 8-deep
-// RX FIFO overran). Framing is taken from CS edges — core 0 polls only the
-// edges, never per byte — and the received length comes from the RX DMA's
-// residual transfer_count.
+// RX is captured by a DMA channel off the SPI RX DREQ, so reception is immune
+// to core-0 processing latency within a burst (the polled predecessor lost
+// bytes when core 0 entered the read loop late and the 8-deep RX FIFO overran).
+// Framing comes from CS edges — core 0 polls only the edges, never per byte —
+// and the received length is read from the RX DMA's residual transfer_count.
 //
-//   - RX DMA: SPI DR -> msg.data_, paced by RX DREQ, count = MESSAGE_MAXIMUM.
-//   - TX DMA: tx_buf_ -> SPI DR,   paced by TX DREQ, count = MESSAGE_MAXIMUM.
-//             tx_buf_[0..2] = armed CIPO confirmation; [3..] = 0x00 filler so
-//             the TX FIFO never underflows mid-frame.
+//   - RX: SPI DR -> msg.data_ via DMA, paced by RX DREQ, count = MESSAGE_MAXIMUM.
+//   - TX: the 3-byte CIPO confirmation (+ two 0x00 filler bytes) is written
+//         straight into the TX FIFO before the transaction (no DMA). A full
+//         frame clocks all five out, so the FIFO self-empties and leaves no
+//         residue to shift the next reply. The filler keeps the CRC byte from
+//         being last in the FIFO, where TX underflow would truncate its tail.
+//
+// (A previous revision used a TX DMA over-provisioned to MESSAGE_MAXIMUM_SIZE.
+// It left up to 8 filler bytes in the FIFO between transactions, which clocked
+// out first and shifted the confirmation off byte 0 — and the mid-burst DMA
+// refill raced the clock and corrupted the trailing bytes. Direct FIFO writes
+// avoid both.)
 //
 // Remaining limitation: if core 0 is busy past a whole CS window the frame is
 // skipped, not corrupted (we never arm mid-burst). The fully IRQ-driven variant
@@ -28,12 +35,11 @@
 // [VERIFY] items must be confirmed on hardware / against the RP2350 datasheet.
 // ----------------------------------------------------------------------------
 
-// CIPO confirmation slot + filler. Index 0..2 = {header, cmd, checksum};
-// 3..MAX-1 = 0x00. Boot/empty sentinel is {0x81, 0x00, 0x00}.
-static uint8_t tx_buf_[MESSAGE_MAXIMUM_SIZE] = {0x81, 0x00, 0x00};
+// Armed 3-byte CIPO confirmation {header, cmd, checksum}. Boot/empty sentinel
+// is {0x81, 0x00, 0x00}.
+static uint8_t tx_buf_[3] = {0x81, 0x00, 0x00};
 
 static int  rx_dma_chan_ = -1;
-static int  tx_dma_chan_ = -1;
 static bool dma_ready_   = false;
 
 // ----------------------------------------------------------------------------
@@ -42,24 +48,15 @@ static bool dma_ready_   = false;
 // ----------------------------------------------------------------------------
 static void ensure_dma_init() {
     if (dma_ready_) return;
-
     rx_dma_chan_ = dma_claim_unused_channel(true);
-    tx_dma_chan_ = dma_claim_unused_channel(true);
     dma_ready_   = true;
 }
 
 // ----------------------------------------------------------------------------
-// Discard any residual RX bytes left in the FIFO and clear a sticky overrun,
-// WITHOUT disabling the peripheral. Only legal while CS is idle (high).
-//
-// We deliberately do NOT toggle the SSE (enable) bit here. Disabling and
-// re-enabling the PL022 under an idle-high MODE3 clock (CPOL=1/CPHA=1) injects
-// a one-bit phase shift into the first frame after re-enable, which corrupts
-// byte alignment and fails the parity check (observed as a PE02 glyph). The
-// peripheral stays continuously enabled — matching the known-good alignment of
-// the previous polled implementation — and we only drain leftover bytes by
-// reading them, which is a no-op in the normal case (the prior transaction's
-// RX DMA already consumed exactly num_bytes).
+// Discard any residual RX bytes and clear a sticky overrun. RX-only: the
+// peripheral stays continuously enabled to preserve byte alignment (an SSE
+// toggle does not reliably clear the FIFOs on this silicon anyway). A no-op in
+// the normal case, since the RX DMA already consumed exactly num_bytes.
 // ----------------------------------------------------------------------------
 static void spi_drain_rx() {
     spi_hw_t *hw = spi_get_hw(SPI_INST);
@@ -68,13 +65,35 @@ static void spi_drain_rx() {
 }
 
 // ----------------------------------------------------------------------------
-// Arm both DMA channels for one transaction of up to MESSAGE_MAXIMUM_SIZE
-// bytes and start them together. RX writes into `rx_dst`; TX reads tx_buf_.
+// Write the 3-byte CIPO confirmation into the TX FIFO so it clocks out starting
+// at byte 0 of the next transaction, followed by two 0x00 filler bytes. Must
+// run while CS is idle (FIFO writable).
+//
+// The filler matters: the PL022 truncates the trailing bits of the *last* FIFO
+// byte when it underflows, so the CRC must not be last (observed without
+// padding: CRC 0x62 clocked out as 0x60). Two trailing zeros put the underflow
+// past the confirmation slot. The shortest real frame is ERROR_DISPLAY = 5
+// bytes, so all five queued bytes clock out on any valid frame and the FIFO
+// self-empties — no residue to shift the next reply.
 // ----------------------------------------------------------------------------
-static void arm_dma(uint8_t *rx_dst) {
+static void prime_tx_confirmation() {
     spi_hw_t *hw = spi_get_hw(SPI_INST);
+    for (int i = 0; i < 3; i++) {
+        while (!spi_is_writable(SPI_INST)) { tight_loop_contents(); }
+        hw->dr = (uint32_t) tx_buf_[i];
+    }
+    for (int i = 0; i < 2; i++) {
+        while (!spi_is_writable(SPI_INST)) { tight_loop_contents(); }
+        hw->dr = (uint32_t) 0x00;
+    }
+}
 
-    // RX: read from DR (no increment), write to buffer (increment).
+// ----------------------------------------------------------------------------
+// Arm and start the RX DMA for one transaction of up to MESSAGE_MAXIMUM_SIZE
+// bytes, writing into `rx_dst`.
+// ----------------------------------------------------------------------------
+static void arm_rx_dma(uint8_t *rx_dst) {
+    spi_hw_t *hw = spi_get_hw(SPI_INST);
     dma_channel_config rc = dma_channel_get_default_config(rx_dma_chan_);
     channel_config_set_transfer_data_size(&rc, DMA_SIZE_8);
     channel_config_set_read_increment(&rc, false);
@@ -84,23 +103,7 @@ static void arm_dma(uint8_t *rx_dst) {
                           rx_dst,            // write addr
                           &hw->dr,           // read addr (SPI data reg)
                           MESSAGE_MAXIMUM_SIZE,
-                          false);            // don't start yet
-
-    // TX: read from tx_buf_ (increment), write to DR (no increment).
-    dma_channel_config tc = dma_channel_get_default_config(tx_dma_chan_);
-    channel_config_set_transfer_data_size(&tc, DMA_SIZE_8);
-    channel_config_set_read_increment(&tc, true);
-    channel_config_set_write_increment(&tc, false);
-    channel_config_set_dreq(&tc, spi_get_dreq(SPI_INST, true));   // true = TX
-    dma_channel_configure(tx_dma_chan_, &tc,
-                          &hw->dr,           // write addr (SPI data reg)
-                          tx_buf_,           // read addr
-                          MESSAGE_MAXIMUM_SIZE,
-                          false);            // don't start yet
-
-    // Start both atomically. TX immediately pre-fills the 8-deep TX FIFO with
-    // the confirmation bytes so byte 0 on CIPO is correct on the next CS edge.
-    dma_start_channel_mask((1u << rx_dma_chan_) | (1u << tx_dma_chan_));
+                          true);             // start now (waits on RX DREQ)
 }
 
 // ----------------------------------------------------------------------------
@@ -109,19 +112,38 @@ static void arm_dma(uint8_t *rx_dst) {
 
 void panel_spi_arm_confirmation(uint8_t header, uint8_t cmd, uint8_t checksum) {
     ensure_dma_init();
+#if SPI_TX_STATIC
+    // Diagnostic: ignore the real confirmation and emit a fixed, recognizable
+    // pattern so a logic-analyzer CIPO capture isolates TX timing/alignment
+    // from confirmation content. Build with -DSPI_TX_STATIC=1.
+    tx_buf_[0] = 0xA5; tx_buf_[1] = 0x5A; tx_buf_[2] = 0xC3;
+    (void)header; (void)cmd; (void)checksum;
+#else
     tx_buf_[0] = header;
     tx_buf_[1] = cmd;
     tx_buf_[2] = checksum;
-    // No FIFO write here: the TX DMA (armed in panel_spi_read) sources tx_buf_
-    // for the next transaction. Bytes 3.. remain 0x00 filler.
+#endif
 }
 
 void panel_spi_clear_confirmation() {
     ensure_dma_init();
+#if SPI_TX_STATIC
+    tx_buf_[0] = 0xA5; tx_buf_[1] = 0x5A; tx_buf_[2] = 0xC3;
+#else
     tx_buf_[0] = 0x81;
     tx_buf_[1] = 0x00;
     tx_buf_[2] = 0x00;
+#endif
 }
+
+#if SPI_DIAG
+// Copy the currently-armed 3-byte CIPO confirmation for diagnostics.
+void panel_spi_debug_tx(uint8_t out[3]) {
+    out[0] = tx_buf_[0];
+    out[1] = tx_buf_[1];
+    out[2] = tx_buf_[2];
+}
+#endif
 
 void panel_spi_read(Message &msg) {
     ensure_dma_init();
@@ -131,8 +153,9 @@ void panel_spi_read(Message &msg) {
     // wait that burst out first.
     while (!gpio_get(SPI_CS_PIN)) { tight_loop_contents(); }
 
-    spi_drain_rx();
-    arm_dma(msg.data_.data());
+    spi_drain_rx();              // clear residual RX + overrun
+    prime_tx_confirmation();     // load the 3-byte CIPO reply into the TX FIFO
+    arm_rx_dma(msg.data_.data());
 
     while (gpio_get(SPI_CS_PIN))  { tight_loop_contents(); }   // CS falling: start
     while (!gpio_get(SPI_CS_PIN)) { tight_loop_contents(); }   // CS rising: end
@@ -149,7 +172,6 @@ void panel_spi_read(Message &msg) {
                              : (size_t)(MESSAGE_MAXIMUM_SIZE - remaining);
 
     dma_channel_abort(rx_dma_chan_);
-    dma_channel_abort(tx_dma_chan_);
 
     msg.num_bytes_ = received;
 
@@ -162,9 +184,9 @@ void panel_spi_read(Message &msg) {
 
 // ============================================================================
 // NEXT STEP (not in this prototype): fully IRQ-driven, zero core-0 polling.
-//   - Keep RX/TX DMA armed permanently.
+//   - Keep the RX DMA armed permanently.
 //   - GPIO IRQ on CS rising: snapshot transfer_count -> received length, push
-//     the message to a lock-free ring for core 0, abort+re-arm DMA, flush
-//     FIFOs. Core 0 never spins on CS at all, so even whole-frame misses go
+//     the message to a lock-free ring for core 0, re-arm RX DMA, re-prime the
+//     TX FIFO. Core 0 never spins on CS at all, so even whole-frame misses go
 //     away. Requires moving the validity gate off the IRQ hot path.
 // ============================================================================
