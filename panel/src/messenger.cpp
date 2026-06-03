@@ -255,7 +255,17 @@ void Messenger::update() {
         Serial.print(" qdrop=");   Serial.print(queue_drops_);
         Serial.print(" fskip=");   Serial.print(display.frames_skipped());
         Serial.print(" errD/S=");  Serial.print(error_displayed_count_);
-        Serial.print('/');         Serial.println(error_suppressed_count_);
+        Serial.print('/');         Serial.print(error_suppressed_count_);
+        // Currently-armed CIPO confirmation (what the panel intends to reply
+        // on the next transaction). Compare against the MISO logic capture.
+        uint8_t tx3[3];
+        panel_spi_debug_tx(tx3);
+        Serial.print("  txCIPO=");
+        for (int i = 0; i < 3; i++) {
+            if (tx3[i] < 0x10) Serial.print('0');
+            Serial.print(tx3[i], HEX); Serial.print(' ');
+        }
+        Serial.println();
 
         // On a parity miss, show the panel's computed parity vs the received
         // bit and which payload bytes differ from the all-0xFF "All On" frame.
