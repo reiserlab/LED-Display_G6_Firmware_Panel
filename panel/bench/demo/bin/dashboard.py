@@ -127,7 +127,7 @@ function color(i){return `hsl(${240-240*i/(N-1)},72%,46%)`;}
 // --- Plot 1a: latency waveform ---
 Plotly.newPlot('latPlot',[
   {x:LATJIT.t,y:LATJIT.v,mode:'lines',line:{color:'#2563eb',width:2.5},name:'photodiode'}
-],{margin:{t:8,r:10,b:42,l:50},xaxis:{title:'µs after trigger',range:[-2,8],zeroline:false},
+],{margin:{t:30,r:10,b:42,l:50},xaxis:{title:'µs after trigger',range:[-2,8],zeroline:false},
    yaxis:{title:'photodiode (mV)'},showlegend:false,
    shapes:[{type:'line',x0:0,x1:0,yref:'paper',y0:0,y1:1,line:{color:'#111',dash:'dash',width:1.4}},
            {type:'line',x0:LATJIT.latency_us,x1:LATJIT.latency_us,yref:'paper',y0:0,y1:1,line:{color:'#b3261e',dash:'dot',width:2}}],
@@ -138,7 +138,7 @@ Plotly.newPlot('latPlot',[
 // --- Plot 1b: onset jitter histogram ---
 Plotly.newPlot('jitPlot',[
   {x:LATJIT.onsets_us,type:'histogram',marker:{color:'#2563eb'},xbins:{size:0.04}}
-],{margin:{t:8,r:10,b:42,l:50},xaxis:{title:'trigger→LED onset (µs)'},yaxis:{title:'count'},
+],{margin:{t:30,r:10,b:42,l:50},xaxis:{title:'trigger→LED onset (µs)'},yaxis:{title:'count'},
    shapes:[{type:'line',x0:LATJIT.latency_us,x1:LATJIT.latency_us,yref:'paper',y0:0,y1:1,line:{color:'#b3261e',dash:'dot',width:2}}],
    annotations:[{x:LATJIT.latency_us,y:1,yref:'paper',yanchor:'bottom',text:`σ=${(LATJIT.jitter_us*1000).toFixed(0)} ns`,showarrow:false,font:{size:12,color:'#b3261e'}}]},
    {displayModeBar:false,responsive:true});
