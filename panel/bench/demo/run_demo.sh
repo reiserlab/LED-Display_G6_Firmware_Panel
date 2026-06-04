@@ -10,6 +10,9 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; BIN="$DIR/bin"; DATA="$DIR/data"
 PY="${PY:-python3}"; PY314="${PY314:-/opt/homebrew/bin/python3.14}"
 MODE="${1:-cached}"
+AUDIO="${AUDIO:-1}"   # spoken cues + chimes during the demo; set AUDIO=0 to silence
+_say(){ [ "$AUDIO" = "1" ] && ( say "$1" >/dev/null 2>&1 & ) || true; }
+_chime(){ [ "$AUDIO" = "1" ] && ( afplay "/System/Library/Sounds/${1:-Glass}.aiff" >/dev/null 2>&1 & ) || true; }
 build(){ "$PY" "$BIN/dashboard.py" "$DIR/dashboard.html"; }
 open_dash(){ if command -v open >/dev/null; then open "$DIR/dashboard.html"; else echo "open $DIR/dashboard.html"; fi; }
 DUTIES="16 32 48 64 85 100 128 160 200 255"
@@ -18,10 +21,12 @@ case "$MODE" in
   check)
     "$PY" "$BIN/stream.py" --mode allon
     "$PY314" "$BIN/check.py"
+    _chime Ping
     "$PY" "$BIN/stream.py" --mode alloff ;;
   cached)
     build; open_dash ;;
   sweep|live)
+    _chime Submarine; _say "Recording started"
     echo "== live duty sweep (photodiode on-time) =="
     for D in $DUTIES; do
       "$PY" "$BIN/stream.py" --mode triggered --duty "$D" >/dev/null
@@ -35,6 +40,7 @@ case "$MODE" in
       cp /tmp/lat_jit.json "$DATA/"
     fi
     "$PY" "$BIN/stream.py" --mode alloff >/dev/null
+    _say "Measurement complete"; _chime Glass
     build; open_dash ;;
   *) echo "usage: $(basename "$0") [check|cached|sweep|live]"; exit 2 ;;
 esac

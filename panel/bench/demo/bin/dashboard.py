@@ -90,12 +90,13 @@ BODY = """
 <div class="panel">
  <h2>2 · Brightness vs sync window &nbsp;<span class="note">(set your timing budget — which levels fit?)</span></h2>
  <div class="ctl">
-   <span><label>Time budget</label> <input id="budget" type="number" value="20" min="1" step="1"> µs</span>
+   <span><label>Time budget</label> <input id="budget" type="number" value="50" min="1" step="1"> µs</span>
    <span><label>Trigger rate</label> <input id="freq" type="number" value="8" min="0.1" step="0.5"> kHz → interval <b id="interval">125.0</b> µs</span>
    <span><label>Fit metric</label>
      <label class="note"><input type="radio" name="metric" value="ontime" checked> on-time</label>
      <label class="note"><input type="radio" name="metric" value="offby"> trigger→LED-off</label>
    </span>
+   <span><button id="snd" type="button" style="padding:5px 10px;border-radius:6px;border:1px solid #c6ccd2;background:#fff;cursor:pointer">🔇 sound</button></span>
  </div>
  <div class="summary" id="summary"></div>
  <div class="grid2">
@@ -154,15 +155,28 @@ function buildSweep(){
 const $=id=>document.getElementById(id);
 function metric(){return document.querySelector('input[name=metric]:checked').value;}
 function fitVal(d,m){return m==='ontime'?d.fwhm:d.onset+d.fwhm;}
+// --- Web Audio: reveal chime on enable + a soft tone as a level crosses the budget ---
+let AC=null,sndOn=false,prevFit=null;
+function tone(f,dur,vol,type){if(!AC||!sndOn)return;const o=AC.createOscillator(),g=AC.createGain();
+  o.type=type||'sine';o.frequency.value=f;o.connect(g);g.connect(AC.destination);const t=AC.currentTime;
+  g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(vol||0.12,t+0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001,t+(dur||0.2));o.start(t);o.stop(t+(dur||0.2)+0.02);}
+function dutyFreq(d){return 320+(d/255)*880;}
+function reveal(){[523.25,659.25,783.99,1046.5].forEach((f,i)=>setTimeout(()=>tone(f,0.22,0.13,'triangle'),i*95));}
+$('snd').addEventListener('click',()=>{if(!AC)AC=new (window.AudioContext||window.webkitAudioContext)();
+  sndOn=!sndOn;$('snd').textContent=sndOn?'🔊 sound on':'🔇 sound';if(sndOn){AC.resume();reveal();}});
 function update(){
   const budget=+$('budget').value,freq=+$('freq').value,m=metric(),interval=1000/freq;
   $('interval').textContent=interval.toFixed(1);
   const deadlineX=(m==='ontime'?medOnset:0)+budget;
-  const op=SWEEP.map(d=>fitVal(d,m)<=budget?1:0.18), w=SWEEP.map(d=>fitVal(d,m)<=budget?3:1.2);
-  Plotly.restyle('sweepPlot',{opacity:op,'line.width':w});
+  const fitArr=SWEEP.map(d=>fitVal(d,m)<=budget);
+  Plotly.restyle('sweepPlot',{opacity:fitArr.map(f=>f?1:0.18),'line.width':fitArr.map(f=>f?3:1.2)});
   Plotly.relayout('sweepPlot',{'shapes[1].x0':deadlineX,'shapes[1].x1':deadlineX});
+  if(sndOn&&prevFit){SWEEP.forEach((d,i)=>{if(fitArr[i]!==prevFit[i]){
+    const f=dutyFreq(d.duty);tone(fitArr[i]?f:f*0.6,0.16,0.11,fitArr[i]?'triangle':'sine');}});}
+  prevFit=fitArr;
   let nfit=0,maxD=null,rows='';
-  SWEEP.forEach((d,i)=>{const off=d.onset+d.fwhm,fits=fitVal(d,m)<=budget;if(fits){nfit++;maxD=d.duty;}
+  SWEEP.forEach((d,i)=>{const off=d.onset+d.fwhm,fits=fitArr[i];if(fits){nfit++;maxD=d.duty;}
     rows+=`<tr class="${fits?'fit':'nofit'}"><td><span class="swatch" style="background:${color(i)}"></span>${d.duty}</td>`+
           `<td>${d.fwhm.toFixed(1)}</td><td>${off.toFixed(1)}</td><td>${(d.fwhm/interval*100).toFixed(0)}%</td>`+
           `<td class="${fits?'yes':'no'}">${fits?'✓':'✗'}</td></tr>`;});

@@ -54,7 +54,13 @@ bash panel/bench/demo/run_demo.sh live      # LIVE: sweep + latency/jitter (~45s
 ```
 
 `dashboard.html` opens in the browser. Section 2 (brightness/on-time) is interactive —
-type a **time budget** and **trigger rate**; it shows which `duty_cycle` levels fit.
+type a **time budget** (default **50 µs** → all levels fit; drag down to narrow) and
+**trigger rate**; it shows which `duty_cycle` levels fit.
+
+**Audio:** click **🔊 sound** on the page to enable Web Audio — a reveal chime, then a
+tone as each level crosses your budget while you drag it (pitch ∝ duty). The live
+measurement also speaks cues ("Recording started" / "Measurement complete") + chimes;
+silence everything with `AUDIO=0 bash panel/bench/demo/run_demo.sh live`.
 
 ---
 
