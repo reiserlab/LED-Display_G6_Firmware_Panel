@@ -57,6 +57,11 @@ static volatile uint32_t s_period_us_max     = 0;
 static volatile uint32_t s_scan_us_min       = UINT32_MAX;
 static volatile uint32_t s_scan_us_max       = 0;
 
+#if STAGE2_SELFTEST
+// Bench: per-row "free work" injection (µs) — see display.h / the 'k' command.
+volatile uint32_t g_bench_inject_us = 0;
+#endif
+
 void display_reset_scan_stats() {
     s_scan_count       = 0;
     s_period_us_total  = 0;
@@ -364,6 +369,11 @@ void Display::show_row(int r) {
     PIO  pio = pio_get_instance();
     uint sm  = pio_get_sm();
 
+#if STAGE2_SELFTEST
+    // Bench: CPU-row path has no autonomous burst to overlap, so injected
+    // "free work" lands here and adds directly to this row's scan time.
+    if (g_bench_inject_us) busy_wait_us(g_bench_inject_us);
+#endif
     gpio_clr_mask64(row_on_mask[r]);   // row LOW = ON (normal polarity)
     for (int b = 0; b < bcm_bits; b++) {
         pio_sm_put_blocking(pio, sm, bcm_plane_data[r][b][0]);

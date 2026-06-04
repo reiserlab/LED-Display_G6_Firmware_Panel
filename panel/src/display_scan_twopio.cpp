@@ -332,6 +332,14 @@ bool twopio_scan_row(int r, int bcm_bits) {
     dma_channel_set_trans_count(ch_col, (uint)(bcm_bits * 2), false);
     dma_start_channel_mask((1u << ch_row) | (1u << ch_col));
 
+#if STAGE2_SELFTEST
+    // Bench: the row burst now runs autonomously on DMA+PIO, so this simulated
+    // "free work" overlaps it — it stays hidden from scan time until it exceeds
+    // the per-row burst. (Contrast the CPU-row path, where it adds directly.)
+    extern volatile uint32_t g_bench_inject_us;
+    if (g_bench_inject_us) busy_wait_us(g_bench_inject_us);
+#endif
+
     if (!wait_burst_done()) {
         // Genuine SM/DMA hang. Leave hardware coherent and self-heal: abort the
         // (possibly still-busy) channels, count the fault, and re-prime both

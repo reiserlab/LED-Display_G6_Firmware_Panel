@@ -310,6 +310,39 @@ static void selftest_handle_serial() {
         st_last_duty_cycle = 0xFF;
         return;
     }
+    if (c == 'k') {
+        // Reclaimable-headroom benchmark. Inject simulated "free work" per row
+        // and watch scan_us respond. On v0.3.1 two-PIO the work overlaps the
+        // autonomous DMA burst (scan stays flat until inject > per-row burst);
+        // on the v0.2.1 CPU-row path every injected µs adds straight to scan
+        // time. Run on both panels and compare — this is the reclaimable
+        // core-1 headroom the two-PIO scanner exposes.
+        Serial.println("Reclaimable-headroom (Gray_2 all-on duty=255; inject = free work us/row):");
+        const uint32_t injects[] = {0, 10, 20, 40};
+        Pattern bp; build_allon_gray2(bp, 255, DisplayMode::Persistent);
+        queue_try_add(&display_queue, &bp);
+        delay(150);
+        for (size_t k = 0; k < sizeof(injects) / sizeof(injects[0]); k++) {
+            g_bench_inject_us = injects[k];
+            delay(100);
+            display_reset_scan_stats();
+            delay(500);
+            ScanStats st; display_get_scan_stats(st);
+            uint32_t avg_scan = st.count ? (st.scan_us_total / st.count) : 0;
+            Serial.print("  inject=");  Serial.print(injects[k]);
+            Serial.print(" us/row  scans="); Serial.print(st.count);
+            Serial.print("  scan-only(avg/min/max us)=");
+            Serial.print(avg_scan); Serial.print("/");
+            Serial.print(st.scan_us_min); Serial.print("/");
+            Serial.print(st.scan_us_max);
+            Serial.print("  per-row="); Serial.print(avg_scan / PANEL_SIZE);
+            Serial.println(" us");
+        }
+        g_bench_inject_us = 0;
+        st_last_idx     = -1;
+        st_last_duty_cycle = 0xFF;
+        return;
+    }
     if (c == 'r') {
         // Set target scan period in µs. Range 100..10000 (10 kHz to 100 Hz).
         // Default is 1000 µs = 1 kHz.
