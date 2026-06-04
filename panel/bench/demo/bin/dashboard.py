@@ -90,13 +90,15 @@ BODY = """
 <div class="panel">
  <h2>2 · Brightness vs sync window &nbsp;<span class="note">(set your timing budget — which levels fit?)</span></h2>
  <div class="ctl">
-   <span><label>Time budget</label> <input id="budget" type="number" value="50" min="1" step="1"> µs</span>
+   <span><label>Time budget</label>
+     <input id="budgetR" type="range" value="50" min="1" max="60" step="1" style="width:200px;vertical-align:middle">
+     <input id="budget" type="number" value="50" min="1" step="1"> µs</span>
    <span><label>Trigger rate</label> <input id="freq" type="number" value="8" min="0.1" step="0.5"> kHz → interval <b id="interval">125.0</b> µs</span>
    <span><label>Fit metric</label>
      <label class="note"><input type="radio" name="metric" value="ontime" checked> on-time</label>
      <label class="note"><input type="radio" name="metric" value="offby"> trigger→LED-off</label>
    </span>
-   <span><button id="snd" type="button" style="padding:5px 10px;border-radius:6px;border:1px solid #c6ccd2;background:#fff;cursor:pointer">🔇 sound</button></span>
+   <span><button id="snd" type="button" style="padding:7px 14px;border-radius:6px;border:1px solid #2563eb;background:#2563eb;color:#fff;cursor:pointer;font-weight:600">🔊 Enable sound</button></span>
  </div>
  <div class="summary" id="summary"></div>
  <div class="grid2">
@@ -155,25 +157,36 @@ function buildSweep(){
 const $=id=>document.getElementById(id);
 function metric(){return document.querySelector('input[name=metric]:checked').value;}
 function fitVal(d,m){return m==='ontime'?d.fwhm:d.onset+d.fwhm;}
-// --- Web Audio: reveal chime on enable + a soft tone as a level crosses the budget ---
-let AC=null,sndOn=false,prevFit=null;
+// --- Web Audio: enable on click, continuous pitch while dragging + a chime as a level crosses the budget ---
+let AC=null,sndOn=false,prevFit=null,lastTick=0;
 function tone(f,dur,vol,type){if(!AC||!sndOn)return;const o=AC.createOscillator(),g=AC.createGain();
   o.type=type||'sine';o.frequency.value=f;o.connect(g);g.connect(AC.destination);const t=AC.currentTime;
   g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(vol||0.12,t+0.012);
   g.gain.exponentialRampToValueAtTime(0.0001,t+(dur||0.2));o.start(t);o.stop(t+(dur||0.2)+0.02);}
 function dutyFreq(d){return 320+(d/255)*880;}
-function reveal(){[523.25,659.25,783.99,1046.5].forEach((f,i)=>setTimeout(()=>tone(f,0.22,0.13,'triangle'),i*95));}
-$('snd').addEventListener('click',()=>{if(!AC)AC=new (window.AudioContext||window.webkitAudioContext)();
-  sndOn=!sndOn;$('snd').textContent=sndOn?'🔊 sound on':'🔇 sound';if(sndOn){AC.resume();reveal();}});
+function budgetFreq(b){return 220+(b/60)*880;}             // theremin sweep while dragging
+function reveal(){[523.25,659.25,783.99,1046.5].forEach((f,i)=>setTimeout(()=>tone(f,0.24,0.16,'triangle'),i*95));}
+async function enableSound(){if(!AC)AC=new (window.AudioContext||window.webkitAudioContext)();
+  try{await AC.resume();}catch(e){}
+  sndOn=!sndOn;$('snd').textContent=sndOn?'🔊 sound ON (drag the slider)':'🔇 sound off';
+  $('snd').style.background=sndOn?'#177245':'#2563eb';
+  if(sndOn)reveal();}
+$('snd').addEventListener('click',enableSound);
 function update(){
   const budget=+$('budget').value,freq=+$('freq').value,m=metric(),interval=1000/freq;
+  // keep slider + number box in lockstep
+  if(+$('budgetR').value!==budget)$('budgetR').value=budget;
   $('interval').textContent=interval.toFixed(1);
   const deadlineX=(m==='ontime'?medOnset:0)+budget;
   const fitArr=SWEEP.map(d=>fitVal(d,m)<=budget);
   Plotly.restyle('sweepPlot',{opacity:fitArr.map(f=>f?1:0.18),'line.width':fitArr.map(f=>f?3:1.2)});
   Plotly.relayout('sweepPlot',{'shapes[1].x0':deadlineX,'shapes[1].x1':deadlineX});
-  if(sndOn&&prevFit){SWEEP.forEach((d,i)=>{if(fitArr[i]!==prevFit[i]){
-    const f=dutyFreq(d.duty);tone(fitArr[i]?f:f*0.6,0.16,0.11,fitArr[i]?'triangle':'sine');}});}
+  if(sndOn){
+    const now=Date.now();
+    if(now-lastTick>45){tone(budgetFreq(budget),0.06,0.05,'sine');lastTick=now;} // always-audible drag feedback
+    if(prevFit)SWEEP.forEach((d,i)=>{if(fitArr[i]!==prevFit[i]){          // louder chime when a level drops in/out
+      const f=dutyFreq(d.duty);tone(fitArr[i]?f:f*0.6,0.18,0.16,fitArr[i]?'triangle':'sine');}});
+  }
   prevFit=fitArr;
   let nfit=0,maxD=null,rows='';
   SWEEP.forEach((d,i)=>{const off=d.onset+d.fwhm,fits=fitArr[i];if(fits){nfit++;maxD=d.duty;}
@@ -186,6 +199,7 @@ function update(){
      `  (${freq} kHz ⇒ ${interval.toFixed(1)} µs interval)`;
 }
 buildSweep();
+$('budgetR').addEventListener('input',()=>{$('budget').value=$('budgetR').value;update();});
 ['budget','freq'].forEach(id=>$(id).addEventListener('input',update));
 document.querySelectorAll('input[name=metric]').forEach(e=>e.addEventListener('change',update));
 update();
