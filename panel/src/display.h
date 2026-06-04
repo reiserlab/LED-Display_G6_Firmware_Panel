@@ -107,6 +107,12 @@ void display_get_scan_stats(ScanStats &out);
 // v0.2.1 CPU-row path it adds straight to scan time (core 1 must be present to
 // feed each bit-plane). 0 = disabled.
 extern volatile uint32_t g_bench_inject_us;
+
+// Cycle-precise (DWT CYCCNT) per-frame scan-time stats for the 'j' jitter
+// command: min/max/avg in core cycles over the frames since the last
+// display_reset_scan_stats(). Jitter = max - min.
+void display_get_scan_cycle_stats(uint32_t &cmin, uint32_t &cmax,
+                                  uint32_t &cavg, uint32_t &ccount);
 #endif
 
 #endif

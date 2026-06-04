@@ -24,7 +24,9 @@ single-PIO-columns + CPU-GPIO-rows path and is the **regression baseline**.
   v0.3.1 two-PIO panel renders the full autocycle (all-off / all-on / checker / Gray_16 gradient /
   duty staircase / Oneshot) **identically to the v0.2.1 baseline** — no flicker, ghosting, or
   mapping errors; zero `TWOPIO TIMEOUT`.
-- **BENCHMARKED — the win is reclaimable core-1 headroom + jitter, not raw scan time.**
+- **BENCHMARKED — the win is reclaimable core-1 headroom (~90% of frame), not raw scan time.**
+  Free-running scan-completion jitter is < 4 µs on both (cycle-precise; v021 slightly tighter at
+  full duty), so jitter is *not* a decided win; true 2P-sync edge jitter still needs a Saleae.
 
 ## Method
 
@@ -53,10 +55,29 @@ benchmark commands:
 
 Scan time is **identical** within 0–3 µs: it is dominated by the LED-on (duty) time, which is the
 same BCM math on both revs — the scanner mechanism does not change it. Refresh ceiling is therefore
-also identical (~1.09 kHz at full Gray_2 duty, ~4 kHz at duty 64), duty-bound on both. The only
-difference here is **jitter**: v031 two-PIO shows 0 µs spread (DMA/PIO self-timed) vs v021's 1–3 µs
-(CPU per-plane handshake variability) — matches the donor's "0.000 µs" measurement; the precise
-figure wants a Saleae capture, the µs-resolution timer only resolves it coarsely.
+also identical (~1.09 kHz at full Gray_2 duty, ~4 kHz at duty 64), duty-bound on both.
+
+### scan-completion jitter (`j`, DWT cycle counter, 6.67 ns/cyc @ 150 MHz)
+
+The 1 µs `time_us_32` stats are too coarse for jitter; the `j` command times each frame's scan in
+DWT cycles. Per-frame scan-completion jitter (max − min) over ~1000 frames:
+
+| pattern | v031 two-PIO avg / jitter | v021 CPU-rows avg / jitter |
+|---|---|---|
+| Gray_2 duty 64  | 35990 cyc (239 µs) / 525 cyc = 3.5 µs  | 36283 cyc (241 µs) / 484 cyc = 3.2 µs |
+| Gray_2 duty 255 | 137240 cyc (914 µs) / 548 cyc = 3.65 µs | 137611 cyc (917 µs) / 58 cyc = 0.39 µs |
+
+**Correction to an earlier coarse reading:** the 1 µs sweep made v031 look like "0 µs spread", but
+at cycle resolution the free-running scan-completion jitter is small for *both* (≤ ~3.7 µs, < 0.4 %
+of the 1 ms frame) and **v031 two-PIO is NOT lower — at full duty v021 is tighter (0.39 µs vs
+3.65 µs).** Cause: v031's `wait_burst_done` uses a 3-stage poll (DMA `transfer_count` → col SM PC →
+row SM PC), each exiting on a poll-loop-iteration boundary (~27 cyc/row of detection granularity),
+whereas v021's single per-plane IRQ-wait catches the PIO IRQ within a couple cycles (~3 cyc/row).
+This is a completion-*detection* artifact on core 1, **not** the display's actual row/column edge
+timing. **Caveat:** the jitter that matters for Triggered / 2P-sync is the *trigger→row-edge*
+latency on a single row burst (PIO-clock-precise on both — the donor's "0.000 µs" regime), which
+needs a Saleae capture and is NOT what this free-running 20-row traversal measures. So scan jitter
+is **not** a decided win for either rev from this data.
 
 ### reclaimable core-1 headroom (`k`, Gray_2 all-on duty 255)
 
@@ -78,20 +99,22 @@ and the frame rate collapses (499→290) — **~0 reclaimable**; core 1 must fee
 The hypothesis "v0.3.1 frees CPU resources → higher performance" is **confirmed, with the precise
 mechanism**: not a smaller scan time (duty-bound, identical) but **~90% of core-1 frame time made
 reclaimable** for concurrent work (V2/PSRAM command handling, OTA, trigger logic, future features)
-while the panel scans autonomously — plus near-zero scan jitter. The CPU-row path offers essentially
-none of that: core 1 *is* the scanner.
+while the panel scans autonomously. The CPU-row path offers essentially none of that: core 1 *is*
+the scanner. Free-running scan-completion jitter is a wash (both < 4 µs; v021 slightly tighter at
+full duty — see above); true 2P-sync edge jitter is still unmeasured (needs Saleae).
 
 | Dimension | v0.2.1 (CPU-rows) | v0.3.1 (two-PIO) |
 |---|---|---|
 | Visual correctness | baseline | identical |
 | Scan time / refresh ceiling | ~915 µs / ~1.09 kHz | ~915 µs / ~1.09 kHz |
-| Scan jitter | 1–3 µs | ~0 µs |
+| Scan-completion jitter (free-run) | 0.4–3.2 µs | 3.5–3.7 µs (tie/slightly worse) |
 | Core-1 reclaimable for other work | ~0 | **~900 µs/frame (~90%)** |
 | Firmware complexity | simpler (shared path) | rev-specific scan TU |
 
-**Pick v0.3.1** if core 1 will ever do real work alongside a live display, or if tight Triggered /
-2P-sync timing matters. If the display is core 1's sole job and jitter is irrelevant, the two are
-functionally equivalent and v0.2.1 is simpler.
+**Pick v0.3.1** primarily if core 1 will do real work alongside a live display (the reclaimable-
+headroom win). The Triggered / 2P-sync edge-jitter case is plausible but **not yet demonstrated** —
+measure trigger→row-edge latency on the Saleae before relying on it. If the display is core 1's sole
+job, the two are functionally equivalent and v0.2.1 is simpler.
 
 ## How to reproduce
 

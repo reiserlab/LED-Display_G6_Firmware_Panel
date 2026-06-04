@@ -60,6 +60,31 @@ static volatile uint32_t s_scan_us_max       = 0;
 #if STAGE2_SELFTEST
 // Bench: per-row "free work" injection (µs) — see display.h / the 'k' command.
 volatile uint32_t g_bench_inject_us = 0;
+
+// Cycle-precise (DWT CYCCNT, ~6.67 ns @ 150 MHz) per-frame scan-time stats for
+// the 'j' jitter command — finer than the 1 µs time_us_32 stats. DWT is
+// core-local on the M33, so it is enabled lazily here on core 1 (where show()
+// runs). Ported from G6_Panels_Test_Firmware dwt_init().
+#include <hardware/structs/m33.h>
+static volatile uint32_t s_scan_cyc_min   = UINT32_MAX;
+static volatile uint32_t s_scan_cyc_max   = 0;
+static volatile uint64_t s_scan_cyc_total = 0;
+static volatile uint32_t s_scan_cyc_count = 0;
+static bool s_dwt_ready = false;
+static inline void dwt_ensure() {
+    if (s_dwt_ready) return;
+    m33_hw->demcr    |= (1UL << 24);   // TRCENA
+    m33_hw->dwt_ctrl |= (1UL << 0);    // CYCCNTENA
+    m33_hw->dwt_cyccnt = 0;
+    s_dwt_ready = true;
+}
+void display_get_scan_cycle_stats(uint32_t &cmin, uint32_t &cmax,
+                                  uint32_t &cavg, uint32_t &ccount) {
+    ccount = s_scan_cyc_count;
+    cmin   = (s_scan_cyc_min == UINT32_MAX) ? 0 : s_scan_cyc_min;
+    cmax   = s_scan_cyc_max;
+    cavg   = s_scan_cyc_count ? (uint32_t)(s_scan_cyc_total / s_scan_cyc_count) : 0;
+}
 #endif
 
 void display_reset_scan_stats() {
@@ -70,6 +95,12 @@ void display_reset_scan_stats() {
     s_period_us_max    = 0;
     s_scan_us_min      = UINT32_MAX;
     s_scan_us_max      = 0;
+#if STAGE2_SELFTEST
+    s_scan_cyc_min     = UINT32_MAX;
+    s_scan_cyc_max     = 0;
+    s_scan_cyc_total   = 0;
+    s_scan_cyc_count   = 0;
+#endif
 }
 
 void display_get_scan_stats(ScanStats &out) {
@@ -417,6 +448,10 @@ void Display::show() {
     // ~260x to a useless ~4x.
 
     uint32_t t_start = time_us_32();
+#if STAGE2_SELFTEST
+    dwt_ensure();
+    uint32_t c_start = m33_hw->dwt_cyccnt;   // cycle-precise scan-time start
+#endif
 
 #if PANEL_REV == 31
     // v0.3.1: one DMA-fed two-PIO burst per row; core 1 only arms + polls,
@@ -437,6 +472,9 @@ void Display::show() {
 
     uint32_t t_scan_end = time_us_32();
     uint32_t scan_us    = t_scan_end - t_start;
+#if STAGE2_SELFTEST
+    uint32_t scan_cyc   = m33_hw->dwt_cyccnt - c_start;   // scan-only cycles
+#endif
 
     // Pad to target period. If the scan already overran the target (e.g.,
     // Gray_16 duty_cycle=255 needs ~920 µs which is close to 1000 µs), skip
@@ -459,6 +497,12 @@ void Display::show() {
     if (period_us > s_period_us_max) s_period_us_max = period_us;
     if (scan_us   < s_scan_us_min)   s_scan_us_min   = scan_us;
     if (scan_us   > s_scan_us_max)   s_scan_us_max   = scan_us;
+#if STAGE2_SELFTEST
+    s_scan_cyc_count++;
+    s_scan_cyc_total += scan_cyc;
+    if (scan_cyc < s_scan_cyc_min) s_scan_cyc_min = scan_cyc;
+    if (scan_cyc > s_scan_cyc_max) s_scan_cyc_max = scan_cyc;
+#endif
 }
 
 

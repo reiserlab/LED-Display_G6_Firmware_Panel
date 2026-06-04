@@ -343,6 +343,36 @@ static void selftest_handle_serial() {
         st_last_duty_cycle = 0xFF;
         return;
     }
+    if (c == 'j') {
+        // Cycle-precise per-frame scan jitter (DWT CYCCNT, ~6.67 ns @ 150 MHz),
+        // finer than the 1 µs 't' stats. Jitter = (max - min) scan time over a
+        // ~1 s window. Two-PIO (DMA/PIO self-timed) should be near-flat;
+        // CPU-rows carries per-plane handshake variability.
+        Serial.println("Scan jitter (DWT; Gray_2 all-on; cyc + us/ns):");
+        const uint8_t duties[] = {64, 255};
+        uint32_t cpu = cycles_per_us ? cycles_per_us : 150;
+        for (size_t i = 0; i < sizeof(duties) / sizeof(duties[0]); i++) {
+            Pattern bp; build_allon_gray2(bp, duties[i], DisplayMode::Persistent);
+            queue_try_add(&display_queue, &bp);
+            delay(150);
+            display_reset_scan_stats();
+            delay(1000);   // ~1000 frames at the 1 kHz target
+            uint32_t cmin, cmax, cavg, ccount;
+            display_get_scan_cycle_stats(cmin, cmax, cavg, ccount);
+            uint32_t jit = (cmax >= cmin) ? (cmax - cmin) : 0;
+            Serial.print("  duty=");    Serial.print(duties[i]);
+            Serial.print("  frames=");  Serial.print(ccount);
+            Serial.print("  scan avg="); Serial.print(cavg);
+            Serial.print("cyc/");       Serial.print(cavg / cpu); Serial.print("us");
+            Serial.print("  min=");     Serial.print(cmin);
+            Serial.print("  max=");     Serial.print(cmax);
+            Serial.print("  JITTER=");  Serial.print(jit);
+            Serial.print("cyc/");       Serial.print(jit * 1000 / cpu); Serial.println("ns");
+        }
+        st_last_idx     = -1;
+        st_last_duty_cycle = 0xFF;
+        return;
+    }
     if (c == 'r') {
         // Set target scan period in µs. Range 100..10000 (10 kHz to 100 Hz).
         // Default is 1000 µs = 1 kHz.
