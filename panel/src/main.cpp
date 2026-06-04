@@ -8,6 +8,7 @@
 #include "bcm.h"
 #include "layout.h"
 #include "display_pio.h"
+#include "display_scan_twopio.h"
 #include "predef_patterns.h"
 #include "psram_store.h"
 
@@ -649,6 +650,15 @@ void setup1() {
     init_index_maps();
     precompute_scan_masks();
 
+#if PANEL_REV == 31
+    // v0.3.1: dual-PIO (rows on PIO1 + columns on PIO0) + dual-DMA scanner,
+    // replacing the v0.2.1 single-PIO-columns + CPU-GPIO-rows path.
+    if (!twopio_init()) {
+        Serial.println("FATAL: twopio_init() failed - display dark");
+        twopio_fail_dark();
+        while (true) { tight_loop_contents(); }
+    }
+#else
     if (!pio_init_program()) {
         Serial.println("FATAL: pio_init_program() failed - display dark");
         // Fail-dark: rows already HIGH (off), cols already LOW (off) from
@@ -656,6 +666,7 @@ void setup1() {
         while (true) { tight_loop_contents(); }
     }
     pio_start();
+#endif
 
     // Seed with all-off Persistent boot pattern so first scan iteration is
     // valid and the BCM engine continuously refreshes (cleaner than
@@ -664,6 +675,9 @@ void setup1() {
     Pattern boot_pat;
     boot_pat.set_mode(DisplayMode::Persistent);
     precompute_bcm_data(boot_pat);
+#if PANEL_REV == 31
+    twopio_precompute((boot_pat.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
+#endif
 }
 
 void loop1() {

@@ -2,6 +2,7 @@
 #include "display.h"
 #include "bcm.h"
 #include "display_pio.h"
+#include "display_scan_twopio.h"
 #include "predef_patterns.h"
 #include "protocol.h"
 #include <hardware/pio.h>
@@ -175,6 +176,9 @@ void Display::update() {
             triggered_active_   = false;
         }
         precompute_bcm_data(pat_);
+#if PANEL_REV == 31
+        twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
+#endif
         if (pops > 1) frames_skipped_ += (pops - 1);
     }
 
@@ -267,6 +271,9 @@ void Display::enter_error_display(uint32_t slot) {
     oneshot_pending_      = false;     // Persistent within the error window
     triggered_active_     = false;     // suspended; will be restored on exit
     precompute_bcm_data(pat_);
+#if PANEL_REV == 31
+    twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
+#endif
     error_until_us_       = time_us_64() + ERROR_DISPLAY_DURATION_US;
     error_display_active  = true;      // single-writer; volatile suffices
 }
@@ -298,6 +305,9 @@ void Display::exit_error_display() {
     triggered_active_   = saved_triggered_active_;
     triggered_next_row_ = saved_triggered_next_row_;
     precompute_bcm_data(pat_);
+#if PANEL_REV == 31
+    twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
+#endif
 }
 
 
@@ -345,6 +355,12 @@ void Display::show_row(int r) {
     //   departure (see plan).
     // ----------------------------------------------------------------------
     uint8_t bcm_bits = (pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4;
+#if PANEL_REV == 31
+    // v0.3.1: both axes are PIO/DMA-driven — one autonomous burst scans this
+    // row through all bit-planes. Reached by Triggered (one call per EINT
+    // rising edge) and Gated (one call per row, level checked between rows).
+    twopio_scan_row(r, bcm_bits);
+#else
     PIO  pio = pio_get_instance();
     uint sm  = pio_get_sm();
 
@@ -374,6 +390,7 @@ void Display::show_row(int r) {
         pio_interrupt_clear(pio, 0);
     }
     gpio_set_mask64(row_on_mask[r]);   // row HIGH = OFF
+#endif
 }
 
 
@@ -391,9 +408,16 @@ void Display::show() {
 
     uint32_t t_start = time_us_32();
 
+#if PANEL_REV == 31
+    // v0.3.1: one DMA-fed two-PIO burst per row; core 1 only arms + polls,
+    // freed from the per-bit-plane FIFO push + IRQ busy-wait of the v0.2.1 path.
+    int bcm_bits = (pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4;
+    twopio_scan_frame(bcm_bits);
+#else
     for (int r = 0; r < PANEL_SIZE; r++) {
         show_row(r);
     }
+#endif
 
     uint32_t t_scan_end = time_us_32();
     uint32_t scan_us    = t_scan_end - t_start;
