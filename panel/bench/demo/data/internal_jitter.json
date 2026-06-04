@@ -1,0 +1,19 @@
+{
+ "source": "panel DWT CYCCNT cycle counter (bcmtest 'j' command), per-frame scan-completion time",
+ "cycles_per_us": 150,
+ "panels": [
+  {
+   "rev": "v0.3.1 two-PIO",
+   "scan_avg_us": 914.0,
+   "jitter_us": 3.65,
+   "jitter_cyc": 548
+  },
+  {
+   "rev": "v0.2.1 CPU-rows",
+   "scan_avg_us": 917.0,
+   "jitter_us": 0.39,
+   "jitter_cyc": 58
+  }
+ ],
+ "note": "Internal self-report of full-20-row scan traversal consistency (different axis than the photodiode trigger->LED edge timing)."
+}
