@@ -4,6 +4,7 @@
 #include "constants.h"
 #include "messenger.h"
 #include "panel_spi_custom.h"
+#include "display_scan_twopio.h"
 #include "predef_patterns.h"
 #include "predef_patterns_table.h"
 #include "psram_store.h"
@@ -103,6 +104,12 @@ void diag_dump() {
         diag_emit(b, snprintf(b, sizeof(b), "txCIPO= %02X %02X %02X\r\n",
                               tx3[0], tx3[1], tx3[2]));
     }
+#if PANEL_REV == 31
+    // v0.3.1 two-PIO scanner fault counter (should stay 0). Non-zero means a
+    // per-row burst hit its completion-poll timeout and self-healed.
+    diag_emit(b, snprintf(b, sizeof(b), "twopio_timeouts=%lu\r\n",
+                          (unsigned long)twopio_get_timeouts()));
+#endif
     // V2 PSRAM reception summary (only meaningful once V2 traffic has run).
     if (diag_psram_cmds || diag_psram_oor) {
         unsigned distinct = 0;

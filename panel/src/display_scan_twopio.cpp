@@ -4,6 +4,9 @@
 // (Phase 4 "PIOFULL", commit bb26a44), adapted for production: per-row
 // arm+poll, columns DMA'd directly out of bcm_plane_data[], no jitter-measure
 // scaffolding (multicore_lockout / noInterrupts / DWT / GP43 probe stripped).
+// Hardened per codex-diff-review (LAB-43): coherent self-healing timeout path,
+// start-race-proof completion poll, SDK gpiobase accessor, partial-init unwind,
+// input guards, surfaced timeout counter.
 
 #include "constants.h"
 #include "bcm.h"
@@ -85,6 +88,12 @@ static uint col_off = 0;
 static int  ch_row  = -1;
 static int  ch_col  = -1;
 static bool twopio_loaded = false;
+static bool row_prog_added = false;
+static bool col_prog_added = false;
+
+// Surfaced fault telemetry: incremented on every per-row completion-poll
+// timeout (see twopio_scan_row). Read by the SPI_DIAG dump.
+static volatile uint32_t scan_timeouts = 0;
 
 // Per-row {pattern, delay} pairs. Pattern is 20-bit inverted one-hot (active
 // row LOW). Delay = sum of the row's column bit-plane durations + overhead +
@@ -92,9 +101,10 @@ static bool twopio_loaded = false;
 static uint32_t row_data[PANEL_SIZE * 2];
 
 // Per-row completion-poll timeout. A full-duty Gray_16 row burst is ~50 us;
-// 2 ms is a generous backstop that only fires on a genuine SM/DMA hang (which
-// would otherwise hold a row LOW with its LEDs stuck on indefinitely).
+// 2 ms is a generous backstop that only fires on a genuine SM/DMA hang.
 #define TWOPIO_ROW_TIMEOUT_US 2000u
+
+uint32_t twopio_get_timeouts() { return scan_timeouts; }
 
 // ---------------------------------------------------------------------------
 void twopio_fail_dark() {
@@ -112,39 +122,101 @@ void twopio_fail_dark() {
     }
 }
 
+// Release whatever twopio_init() managed to claim, in reverse order. Safe to
+// call at any partial-init stage (sentinels guard each step). Restores PIO1's
+// GPIO base to 0 only because this module is its only consumer on v0.3.1.
+static void twopio_release_resources() {
+    if (ch_row >= 0) { dma_channel_abort(ch_row); dma_channel_unclaim(ch_row); ch_row = -1; }
+    if (ch_col >= 0) { dma_channel_abort(ch_col); dma_channel_unclaim(ch_col); ch_col = -1; }
+    if (row_pio) {
+        pio_sm_set_enabled(row_pio, row_sm, false);
+        if (row_prog_added) { pio_remove_program(row_pio, &twopio_row_program, row_off); row_prog_added = false; }
+        pio_sm_unclaim(row_pio, row_sm);
+        pio_set_gpio_base(row_pio, 0);
+        row_pio = nullptr;
+    }
+    if (col_pio) {
+        pio_sm_set_enabled(col_pio, col_sm, false);
+        if (col_prog_added) { pio_remove_program(col_pio, &twopio_col_program, col_off); col_prog_added = false; }
+        pio_sm_unclaim(col_pio, col_sm);
+        col_pio = nullptr;
+    }
+}
+
+// Reset both SMs to entry, clear FIFOs, re-enable, and push the one-time
+// all-OFF masks (consumed into Y), leaving both SMs stalled at wrap_target
+// (pull block) ready for the first per-row DMA word. Used at init and to
+// recover from a completion-poll timeout.
+static void twopio_prime() {
+    pio_sm_set_enabled(row_pio, row_sm, false);
+    pio_sm_set_enabled(col_pio, col_sm, false);
+    pio_sm_clear_fifos(row_pio, row_sm);
+    pio_sm_clear_fifos(col_pio, col_sm);
+    pio_sm_exec(row_pio, row_sm, pio_encode_jmp(row_off));
+    pio_sm_exec(col_pio, col_sm, pio_encode_jmp(col_off));
+    pio_sm_set_enabled(row_pio, row_sm, true);
+    pio_sm_set_enabled(col_pio, col_sm, true);
+    pio_sm_put_blocking(row_pio, row_sm, 0xFFFFFu);   // all rows OFF (HIGH)
+    pio_sm_put_blocking(col_pio, col_sm, 0x00000u);   // all cols OFF (LOW)
+}
+
 // ---------------------------------------------------------------------------
 bool twopio_init() {
     if (twopio_loaded) return true;
 
+    // Hardware-layout assumptions this scanner bakes in (v0.3.1 constants):
+    // columns contiguous from GP0, rows contiguous from GP20. If the pin table
+    // ever changes, fail loudly here rather than silently driving wrong pins.
+    if (COL_PIN[0] != 0 || ROW_PIN[0] != 20) {
+        Serial.println("ERR: twopio expects COL_PIN[0]=0, ROW_PIN[0]=20");
+        return false;
+    }
+    for (int i = 0; i < PANEL_SIZE; i++) {
+        if (COL_PIN[i] != (uint8_t)i || ROW_PIN[i] != (uint8_t)(20 + i)) {
+            Serial.println("ERR: twopio expects contiguous COL GP0-19 / ROW GP20-39");
+            return false;
+        }
+    }
+
     // Row program on PIO1 with GPIOBASE=16 (covers GP16-47 → reaches GP20-39).
+    // Use the SDK accessor (state-checked) rather than a raw gpiobase write.
     row_pio = pio1;
-    row_pio->gpiobase = 16;
+    if (pio_set_gpio_base(row_pio, 16) != PICO_OK) {
+        Serial.println("ERR: twopio pio_set_gpio_base(pio1,16) failed");
+        row_pio = nullptr;
+        return false;
+    }
     int rsm = pio_claim_unused_sm(row_pio, false);
     if (rsm < 0 || !pio_can_add_program(row_pio, &twopio_row_program)) {
         Serial.println("ERR: twopio row program: no SM/space on PIO1");
         if (rsm >= 0) pio_sm_unclaim(row_pio, (uint)rsm);
-        row_pio->gpiobase = 0;
+        pio_set_gpio_base(row_pio, 0);
         row_pio = nullptr;
         return false;
     }
     row_sm  = (uint)rsm;
     row_off = pio_add_program(row_pio, &twopio_row_program);
+    row_prog_added = true;
 
-    // Col program on PIO0 (GPIOBASE=0 default, covers GP0-31 → reaches GP0-19).
+    // Col program on PIO0 (GPIOBASE 0 → reaches GP0-19); set explicitly.
     col_pio = pio0;
+    if (pio_set_gpio_base(col_pio, 0) != PICO_OK) {
+        Serial.println("ERR: twopio pio_set_gpio_base(pio0,0) failed");
+        col_pio = nullptr;
+        twopio_release_resources();
+        return false;
+    }
     int csm = pio_claim_unused_sm(col_pio, false);
     if (csm < 0 || !pio_can_add_program(col_pio, &twopio_col_program)) {
         Serial.println("ERR: twopio col program: no SM/space on PIO0");
         if (csm >= 0) pio_sm_unclaim(col_pio, (uint)csm);
-        pio_remove_program(row_pio, &twopio_row_program, row_off);
-        pio_sm_unclaim(row_pio, row_sm);
-        row_pio->gpiobase = 0;
-        row_pio = nullptr;
         col_pio = nullptr;
+        twopio_release_resources();
         return false;
     }
     col_sm  = (uint)csm;
     col_off = pio_add_program(col_pio, &twopio_col_program);
+    col_prog_added = true;
 
     // SM configs. out_pins takes the absolute GPIO number; hardware subtracts
     // the per-PIO GPIOBASE. Shift right, manual pull, 20 OUT pins, full sysclk.
@@ -176,7 +248,7 @@ bool twopio_init() {
     ch_col = dma_claim_unused_channel(false);
     if (ch_row < 0 || ch_col < 0) {
         Serial.println("ERR: twopio cannot claim 2 DMA channels");
-        twopio_fail_dark();
+        twopio_release_resources();   // unclaims SMs/programs/gpiobase + any DMA
         return false;
     }
     dma_channel_config dr = dma_channel_get_default_config(ch_row);
@@ -193,20 +265,7 @@ bool twopio_init() {
     channel_config_set_dreq(&dc, pio_get_dreq(col_pio, col_sm, true));
     dma_channel_configure(ch_col, &dc, &col_pio->txf[col_sm], &bcm_plane_data[0][0][0], 2, false);
 
-    // Prime: reset both SMs to entry, enable, push the one-time all-OFF masks
-    // (consumed into Y), leaving both SMs stalled at their wrap_target waiting
-    // for the first per-row DMA word.
-    pio_sm_set_enabled(row_pio, row_sm, false);
-    pio_sm_set_enabled(col_pio, col_sm, false);
-    pio_sm_clear_fifos(row_pio, row_sm);
-    pio_sm_clear_fifos(col_pio, col_sm);
-    pio_sm_exec(row_pio, row_sm, pio_encode_jmp(row_off));
-    pio_sm_exec(col_pio, col_sm, pio_encode_jmp(col_off));
-    pio_sm_set_enabled(row_pio, row_sm, true);
-    pio_sm_set_enabled(col_pio, col_sm, true);
-    pio_sm_put_blocking(row_pio, row_sm, 0xFFFFFu);   // all rows OFF (HIGH)
-    pio_sm_put_blocking(col_pio, col_sm, 0x00000u);   // all cols OFF (LOW)
-
+    twopio_prime();
     twopio_loaded = true;
     Serial.print("TWOPIO OK: row=pio");
     Serial.print(pio_get_index(row_pio)); Serial.print("/sm"); Serial.print(row_sm);
@@ -219,6 +278,8 @@ bool twopio_init() {
 
 // ---------------------------------------------------------------------------
 void twopio_precompute(int bcm_bits) {
+    if (bcm_bits < 1) bcm_bits = 1;
+    if (bcm_bits > 4) bcm_bits = 4;
     const uint32_t ALL_ROWS_OFF_20  = 0xFFFFFu;   // 20-bit, all rows HIGH = OFF
     const uint32_t ROW_SAFETY_MARGIN = 10;        // PIO cycles of overshoot
     for (int r = 0; r < PANEL_SIZE; r++) {
@@ -235,13 +296,15 @@ void twopio_precompute(int bcm_bits) {
     }
 }
 
-// Block until the in-flight row burst completes. The col-DMA-finish wait is the
-// barrier that defeats the "SM is at wrap_target before it started" race: the
-// DMA cannot finish until the col SM has DREQ-consumed every word, i.e. run the
-// burst. Returns false on timeout.
+// Block until the in-flight row burst completes, or timeout. The col-DMA
+// completion gate uses transfer_count==0 (not dma_channel_is_busy): the count
+// only reaches 0 after the DMA has DREQ-fed every word, i.e. the col SM ran
+// the burst — this defeats the "SM is at wrap_target before it started" race
+// (right after a start, or between rows, the SMs sit at wrap_target with empty
+// FIFOs, which would otherwise read as "done"). Returns false on timeout.
 static bool wait_burst_done() {
     uint32_t t0 = time_us_32();
-    while (dma_channel_is_busy(ch_col)) {
+    while (dma_channel_hw_addr(ch_col)->transfer_count != 0) {
         if ((uint32_t)(time_us_32() - t0) > TWOPIO_ROW_TIMEOUT_US) return false;
     }
     while (!(pio_sm_is_tx_fifo_empty(col_pio, col_sm) &&
@@ -257,6 +320,9 @@ static bool wait_burst_done() {
 
 // ---------------------------------------------------------------------------
 bool twopio_scan_row(int r, int bcm_bits) {
+    if ((unsigned)r >= (unsigned)PANEL_SIZE || bcm_bits < 1 || bcm_bits > 4) {
+        return false;
+    }
     // Row: 2 words {pattern, delay}. Col: bcm_bits {col_word, pio_delay} pairs,
     // straight out of bcm_plane_data[r] (contiguous [4][2] layout). Start both
     // in lockstep so they share a common phase origin.
@@ -267,8 +333,19 @@ bool twopio_scan_row(int r, int bcm_bits) {
     dma_start_channel_mask((1u << ch_row) | (1u << ch_col));
 
     if (!wait_burst_done()) {
-        twopio_fail_dark();
-        twopio_loaded = false;     // force re-init on next twopio_init() call
+        // Genuine SM/DMA hang. Leave hardware coherent and self-heal: abort the
+        // (possibly still-busy) channels, count the fault, and re-prime both
+        // SMs to a clean stall so the next row/frame can scan. The next frame
+        // re-drives every row, clearing any row left LOW by the aborted burst.
+        dma_channel_abort(ch_col);
+        dma_channel_abort(ch_row);
+        scan_timeouts++;
+#if STAGE2_SELFTEST
+        Serial.print("TWOPIO TIMEOUT row="); Serial.print(r);
+        Serial.print(" bits="); Serial.print(bcm_bits);
+        Serial.print(" total="); Serial.println((unsigned long)scan_timeouts);
+#endif
+        twopio_prime();
         return false;
     }
     return true;

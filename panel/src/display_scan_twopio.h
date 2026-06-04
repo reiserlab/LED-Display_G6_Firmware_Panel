@@ -48,8 +48,13 @@ bool twopio_scan_row(int r, int bcm_bits);
 bool twopio_scan_frame(int bcm_bits);
 
 // Drive all pins dark via SIO (cols LOW, rows HIGH = OFF) and disable both SMs.
-// Used on completion-poll timeout and on fatal init failure.
+// Used on fatal init failure (the per-row timeout path self-heals instead).
 void twopio_fail_dark();
+
+// Count of per-row completion-poll timeouts since boot (should stay 0). Each
+// one aborted the row's DMA, drove a fault frame, and re-primed the SMs.
+// Surfaced in the SPI_DIAG dump for bring-up + production visibility.
+uint32_t twopio_get_timeouts();
 
 #endif // PANEL_REV == 31
 #endif // DISPLAY_SCAN_TWOPIO_H

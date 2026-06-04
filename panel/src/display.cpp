@@ -412,7 +412,13 @@ void Display::show() {
     // v0.3.1: one DMA-fed two-PIO burst per row; core 1 only arms + polls,
     // freed from the per-bit-plane FIFO push + IRQ busy-wait of the v0.2.1 path.
     int bcm_bits = (pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4;
-    twopio_scan_frame(bcm_bits);
+    if (!twopio_scan_frame(bcm_bits)) {
+        // Faulted frame: twopio already aborted DMA + re-primed the SMs. Skip
+        // this frame's period pad + scan-stats accounting (a timeout would skew
+        // the timing stats) and let loop1() re-enter. twopio_get_timeouts()
+        // surfaces the fault count in the SPI_DIAG dump.
+        return;
+    }
 #else
     for (int r = 0; r < PANEL_SIZE; r++) {
         show_row(r);
