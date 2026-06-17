@@ -6,23 +6,22 @@ platforms = ["linux-64"]
 version = "0.1.0"
 
 [tasks]
-# NOTE: the deploy*/monitor* tasks below are bound to SPECIFIC physical panels
-# by USB serial number (319A5199EE357F77 = a particular v0.2.1 unit;
-# A5D4B82BA2B9FB51 = a particular v0.3.1 unit). They will only act on those two
-# boards. To deploy/monitor a DIFFERENT panel you must use its own USB serial:
-# find it with `ls /dev/serial/by-id/usb-Reiser_Lab_RP2354_20x20_Display_Panel_*`
-# then either add a new task here or call the script directly, e.g.
-#   bash panel/tools/deploy.sh <THAT_SERIAL> pico_v031
-# As written, these tasks cannot target any other hardware.
-# deploy21 is NOT serial-bound: it flashes pico_v021 to whatever single RP2350
-# PlatformIO/picotool auto-detects. Use it when only one board is connected.
-deploy21     = "pio run -d panel -e pico_v021 -t upload"
-deploy21a    = "bash panel/tools/deploy.sh 319A5199EE357F77 pico_v021"
-deploy31a  = "bash panel/tools/deploy.sh A5D4B82BA2B9FB51 pico_v031"
+# deploy21 / deploy31: flash ALL connected panels of that revision in parallel.
+# Boards must already be running firmware with the current USB product strings
+# (G6 Panel v0.2 / G6 Panel v0.3). Bootstrap a board with the old product
+# string using `pio run -d panel -e pico_v021 -t upload` (picotool auto-detect).
+#
+# deploy21a / deploy31a: target a SPECIFIC panel by USB serial number.
+# Find a board's serial with:
+#   ls /dev/serial/by-id/usb-Reiser_Lab_G6_Panel_v0.2_*-if00
+deploy21       = "bash panel/tools/deploy_all.sh pico_v021"
+deploy31       = "bash panel/tools/deploy_all.sh pico_v031"
+deploy21a      = "bash panel/tools/deploy.sh 319A5199EE357F77 pico_v021"
+deploy31a      = "bash panel/tools/deploy.sh A5D4B82BA2B9FB51 pico_v031"
 deploy21a-diag = "bash panel/tools/deploy.sh 319A5199EE357F77 pico_v021_spidiag"
 deploy31a-diag = "bash panel/tools/deploy.sh A5D4B82BA2B9FB51 pico_v031_spidiag"
-monitor21a   = "bash panel/tools/monitor.sh 319A5199EE357F77"
-monitor31a = "bash panel/tools/monitor.sh A5D4B82BA2B9FB51"
+monitor21a     = "bash panel/tools/monitor.sh 319A5199EE357F77"
+monitor31a     = "bash panel/tools/monitor.sh A5D4B82BA2B9FB51"
 
 [dependencies]
 platformio = ">=6.1.19,<7"
