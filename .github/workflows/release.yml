@@ -15,6 +15,8 @@ on:
 
 permissions:
   contents: write  # create the GitHub Release + upload assets
+  pages: write     # publish manifest.json + UF2s to this repo's GitHub Pages
+  id-token: write  # required by actions/deploy-pages
 
 jobs:
   build:
@@ -93,3 +95,47 @@ jobs:
             release/manifest.json
           fail_on_unmatched_files: true
           generate_release_notes: true
+
+  # Publish the same manifest.json + UF2s to THIS repo's GitHub Pages. GitHub
+  # release-asset downloads are not CORS-accessible, so a browser cannot fetch()
+  # them. The WebUSB flasher lives at reiserlab.github.io/webDisplayTools/flasher
+  # and this site at reiserlab.github.io/<this-repo> — SAME ORIGIN — so the
+  # flasher reads firmware here with no CORS involved. The g6-flash CLI keeps
+  # using the GitHub Release (no CORS for non-browser clients).
+  pages:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: incoming
+
+      - name: Assemble Pages site (manifest.json + UF2s)
+        run: |
+          mkdir -p site
+          cp incoming/*/g6-panel-*.uf2 site/
+          python3 - <<'PY'
+          import glob, json, os
+          version = os.environ.get("GITHUB_REF_NAME", "dev")
+          artifacts = [json.load(open(f)) for f in sorted(glob.glob("incoming/*/artifact-*.json"))]
+          json.dump({"version": version, "artifacts": artifacts},
+                    open("site/manifest.json", "w"), indent=2)
+          PY
+          cat > site/index.html <<'HTML'
+          <!doctype html><meta charset="utf-8"><title>G6 Panel firmware</title>
+          <h1>G6 Panel firmware artifacts</h1>
+          <p>Machine-readable index: <a href="manifest.json">manifest.json</a>.
+          Served same-origin for the
+          <a href="https://reiserlab.github.io/webDisplayTools/flasher/">WebUSB panel flasher</a>;
+          the <code>g6-flash</code> CLI pulls from the GitHub Release instead.</p>
+          HTML
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
