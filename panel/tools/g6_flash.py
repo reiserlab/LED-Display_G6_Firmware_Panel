@@ -181,13 +181,15 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def resolve_uf2(rev: str, fw_version: str | None, local_uf2: str | None) -> Path:
-    """Return a path to the UF2 to flash for `rev` — local file or cached release.
+def resolve_uf2(rev: str, fw_version: str | None, local_uf2: str | None,
+                variant: str = "production") -> Path:
+    """Return a path to the UF2 to flash for `rev`/`variant` — local or cached release.
 
-    Release layout (produced by release.yml): each release carries per-rev UF2s
-    named g6-panel-<rev>.uf2 plus a manifest.json describing rev/env/sha256/
-    usb_product. We pick the artifact for `rev`, download into the per-version
-    cache, and verify its sha256 against the manifest.
+    Release layout (produced by release.yml): each release carries one UF2 per
+    selectable build plus a manifest.json catalog whose entries describe
+    rev/variant/file/sha256/usb_product. We pick the entry matching `rev` AND
+    `variant` (default 'production'), download into the per-version cache, and
+    verify its sha256 against the manifest.
     """
     if local_uf2:
         p = Path(local_uf2)
@@ -208,9 +210,14 @@ def resolve_uf2(rev: str, fw_version: str | None, local_uf2: str | None) -> Path
         _download(assets["manifest.json"], manifest_path)
     manifest = json.loads(manifest_path.read_text())
 
-    entry = next((a for a in manifest.get("artifacts", []) if a.get("rev") == rev), None)
+    # Entries predating the variant field are treated as 'production'.
+    artifacts = manifest.get("artifacts", [])
+    entry = next((a for a in artifacts
+                  if a.get("rev") == rev and a.get("variant", "production") == variant), None)
     if not entry:
-        sys.exit(f"g6-flash: release {tag} manifest has no artifact for rev {rev}.")
+        avail = sorted({f"{a.get('rev')}/{a.get('variant', 'production')}" for a in artifacts})
+        sys.exit(f"g6-flash: release {tag} has no {rev}/{variant} build. "
+                 f"Available: {', '.join(avail) or 'none'}")
 
     fname = entry["file"]
     if fname not in assets:
@@ -226,7 +233,7 @@ def resolve_uf2(rev: str, fw_version: str | None, local_uf2: str | None) -> Path
         if got != expect:
             uf2.unlink(missing_ok=True)
             sys.exit(f"g6-flash: sha256 mismatch for {fname}\n  expected {expect}\n  got      {got}")
-    print(f"g6-flash: firmware {tag} rev {rev} -> {uf2}")
+    print(f"g6-flash: firmware {tag} {rev}/{variant} -> {uf2}")
     return uf2
 
 
@@ -344,6 +351,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--rev", required=True, choices=sorted(REVS),
                     help="panel hardware revision (MANDATORY — selects the binary; "
                          "cannot be auto-detected on a blank board)")
+    ap.add_argument("--variant", default="production", metavar="NAME",
+                    help="firmware build variant to flash (default: production; "
+                         "e.g. 'bcmtest' for the BCM self-test build)")
     ap.add_argument("--uf2", metavar="PATH",
                     help="flash a local UF2 instead of a published release (for firmware devs)")
     ap.add_argument("--fw-version", metavar="TAG",
@@ -378,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     targets = select_targets(panels, args.rev, args.port, args.force)
-    uf2 = resolve_uf2(args.rev, args.fw_version, args.uf2)
+    uf2 = resolve_uf2(args.rev, args.fw_version, args.uf2, args.variant)
     execute = not args.no_exec
 
     print(f"\ng6-flash: flashing {len(targets)} panel(s) as {args.rev} "
