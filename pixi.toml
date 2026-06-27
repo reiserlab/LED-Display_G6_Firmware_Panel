@@ -37,6 +37,17 @@ build31 = "pio run -d panel -e pico_v031"
 image21 = { cmd = "python panel/tools/make_isp_image.py --env pico_v021 --out dist/panel_v0.2.1.bin", depends-on = ["build21"] }
 image31 = { cmd = "python panel/tools/make_isp_image.py --env pico_v031 --out dist/panel_v0.3.1.bin", depends-on = ["build31"] }
 images  = { depends-on = ["image21", "image31"] }
+# flash21 / flash31: rev-aware flashing of NEW/blank *and* running panels via
+# picotool (g6_flash.py reboots a running board into BOOTSEL itself, flashes
+# blank/BOOTSEL boards directly, and verifies the USB product string after).
+# Unlike deploy*, the hardware rev — not a USB serial — selects the binary, so
+# this also programs brand-new panels. Flashes the latest published firmware
+# release by default; pass --uf2 <path> for a local build.
+# NOTE: requires `picotool` on PATH. picotool is NOT a conda-forge package, so
+# it is not pinned here — install it from your OS package manager, or reuse the
+# copy PlatformIO already vendors at ~/.platformio/packages/tool-picotool*/.
+flash21        = "python panel/tools/g6_flash.py --rev v0.2.1"
+flash31        = "python panel/tools/g6_flash.py --rev v0.3.1"
 
 [dependencies]
 platformio = ">=6.1.19,<7"
