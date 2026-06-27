@@ -452,6 +452,7 @@ void setup() {
     selftest_banner();
 #else
     messenger.initialize();
+    Serial.println("[boot] G6 panel core0 ready (ISP firmware)");
 #endif
 }
 
@@ -499,6 +500,10 @@ void loop() {
 #else
     while(true){
     messenger.update();
+    // Service USB CDC (TinyUSB) so Serial output actually flushes. Without this
+    // the tight loop never returns to the core's USB task and all Serial.print
+    // output is buffered forever (no boot banner, no diagnostics over USB).
+    yield();
     }
 #endif
 }
@@ -532,6 +537,11 @@ void setup1() {
     Serial.println(cycles_per_us);
 
     display.initialize();
+
+    // Allow core 0 to park core 1 in a RAM-resident stub during an ISP flash
+    // commit (flash erase/program needs the other core out of XIP). Harmless
+    // when ISP is never used. See isp.cpp do_commit().
+    multicore_lockout_victim_init();
 
     init_index_maps();
     precompute_scan_masks();
