@@ -23,6 +23,20 @@ deploy31a-diag = "bash panel/tools/deploy.sh A5D4B82BA2B9FB51 pico_v031_spidiag"
 monitor21a     = "bash panel/tools/monitor.sh 319A5199EE357F77"
 monitor31a     = "bash panel/tools/monitor.sh A5D4B82BA2B9FB51"
 
+# ISP firmware images: build a production env and wrap the raw flash image in
+# the 32-byte ISP footer {magic, version, image_crc32, image_size} the arena
+# controller validates before reflashing a panel over SPI. See Modular-LED-
+# Display docs/development/g6_03-controller.md § Panel firmware update (ISP).
+# Outputs to dist/. Copy the chosen revision to the controller SD card as
+# /firmware/panel.bin (the controller holds a single firmware at a time).
+#   image21 -> dist/panel_v0.2.1.bin  (G6 panel v0.2.1)
+#   image31 -> dist/panel_v0.3.1.bin  (G6 panel v0.3.1)
+#   images  -> both
+build21 = "pio run -d panel -e pico_v021"
+build31 = "pio run -d panel -e pico_v031"
+image21 = { cmd = "python panel/tools/make_isp_image.py --env pico_v021 --out dist/panel_v0.2.1.bin", depends-on = ["build21"] }
+image31 = { cmd = "python panel/tools/make_isp_image.py --env pico_v031 --out dist/panel_v0.3.1.bin", depends-on = ["build31"] }
+images  = { depends-on = ["image21", "image31"] }
 # flash21 / flash31: rev-aware flashing of NEW/blank *and* running panels via
 # picotool (g6_flash.py reboots a running board into BOOTSEL itself, flashes
 # blank/BOOTSEL boards directly, and verifies the USB product string after).
@@ -37,3 +51,4 @@ flash31        = "python panel/tools/g6_flash.py --rev v0.3.1"
 
 [dependencies]
 platformio = ">=6.1.19,<7"
+python = ">=3.9"

@@ -63,6 +63,16 @@ enum CommandId: uint8_t {
     //   v5 grayscale/color modes — future
     CMD_ID_QUERY_DIAGNOSTIC  = 0x02,
     CMD_ID_RESET_DIAGNOSTICS = 0x03,
+
+    // ---- ISP (header 0x01/0x81) — in-system programming of panel firmware ----
+    // See isp.{h,cpp}. Replies are extended (multi-byte CIPO), driven on a
+    // follow-up read transaction via panel_spi_drive_response().
+    CMD_ID_ISP_ENTER         = 0xE4,
+    CMD_ID_ISP_WRITE_PAGE    = 0xE5,
+    CMD_ID_ISP_VERIFY_STAGED = 0xE6,
+    CMD_ID_ISP_COMMIT        = 0xE7,
+    CMD_ID_ISP_VERIFY_CRC    = 0xE8,
+    CMD_ID_ISP_EXIT_REBOOT   = 0xE9,
 };
 
 constexpr size_t  MESSAGE_MAXIMUM_SIZE = 300;
