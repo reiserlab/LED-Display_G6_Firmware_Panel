@@ -1,9 +1,11 @@
 #include "protocol.h"
 
-// Protocol versions. V1 firmware accepts header 0x01 / 0x81 only.
-// V2 (0x02 / 0x82) is reserved for Triggered/Gated/PSRAM; not yet
-// implemented in this firmware.
+// Protocol versions. V1 = live SPI display (header 0x01 / 0x81). V2 = PSRAM-
+// backed display (header 0x02 / 0x82, LAB-41/42). Inbound version is gated
+// per-command (see command_protocol_version); outgoing CIPO echoes the inbound
+// version, so CMD_PROTOCOL stays V1 as the default for V1 helpers.
 const uint8_t CMD_PROTOCOL_V1 = 0x01;
+const uint8_t CMD_PROTOCOL_V2 = 0x02;
 const uint8_t CMD_PROTOCOL = CMD_PROTOCOL_V1;  // default outgoing version
 
 // Header and payload sizes
@@ -13,6 +15,8 @@ const size_t PAYLOAD_COMMS_CHECK = 200;
 const size_t PAYLOAD_DISPLAY_GRAY_2 = 51;    // 50 pattern + 1 duty_cycle
 const size_t PAYLOAD_DISPLAY_GRAY_16 = 201;  // 200 pattern + 1 duty_cycle
 const size_t PAYLOAD_ERROR_DISPLAY = 3;      // 24-bit LE slot index (V3 0x70-compatible)
+const size_t PAYLOAD_DISPLAY_PSRAM = 2;      // 16-bit LE PSRAM frame index
+const size_t PAYLOAD_DISPLAY_PSRAM_DUTY = 3; // 16-bit LE index + 1 B duty_cycle
 const size_t MESSAGE_MINIMUM_SIZE = HEADER_SIZE + PAYLOAD_MINIMUM_SIZE;
 
 const PayloadSizeUMap PAYLOAD_SIZE_UMAP {
@@ -28,6 +32,16 @@ const PayloadSizeUMap PAYLOAD_SIZE_UMAP {
     {CMD_ID_DISPLAY_GRAY_16_TRIGGERED,   PAYLOAD_DISPLAY_GRAY_16},
     {CMD_ID_DISPLAY_GRAY_16_GATED,       PAYLOAD_DISPLAY_GRAY_16},
     {CMD_ID_ERROR_DISPLAY,               PAYLOAD_ERROR_DISPLAY},
+    // V2 PSRAM display commands. 0x5x: 2 B LE index (duty implicit). 0x6x: 2 B
+    // LE index + 1 B explicit duty_cycle. All four modes share a payload shape.
+    {CMD_ID_DISPLAY_PSRAM,               PAYLOAD_DISPLAY_PSRAM},
+    {CMD_ID_DISPLAY_PSRAM_PERSIST,       PAYLOAD_DISPLAY_PSRAM},
+    {CMD_ID_DISPLAY_PSRAM_TRIGGERED,     PAYLOAD_DISPLAY_PSRAM},
+    {CMD_ID_DISPLAY_PSRAM_GATED,         PAYLOAD_DISPLAY_PSRAM},
+    {CMD_ID_DISPLAY_PSRAM_DUTY,           PAYLOAD_DISPLAY_PSRAM_DUTY},
+    {CMD_ID_DISPLAY_PSRAM_DUTY_PERSIST,   PAYLOAD_DISPLAY_PSRAM_DUTY},
+    {CMD_ID_DISPLAY_PSRAM_DUTY_TRIGGERED, PAYLOAD_DISPLAY_PSRAM_DUTY},
+    {CMD_ID_DISPLAY_PSRAM_DUTY_GATED,     PAYLOAD_DISPLAY_PSRAM_DUTY},
     // ISP payloads (bytes after the 2-byte header). Must match IspController.
     {CMD_ID_ISP_ENTER,                   20},   // sentinel(16) + token(4)
     {CMD_ID_ISP_WRITE_PAGE,              267},  // page_idx(3)+nonce(4)+data(256)+crc32(4)
@@ -36,6 +50,26 @@ const PayloadSizeUMap PAYLOAD_SIZE_UMAP {
     {CMD_ID_ISP_VERIFY_CRC,              14},   // start(3)+len(3)+nonce(4)+crc32(4)
     {CMD_ID_ISP_EXIT_REBOOT,             5},    // nonce(4)+mode(1)
 };
+
+// Per-command protocol version. Disjoint opcode ranges mean a simple switch
+// is enough; unknown opcodes default to V1 (see header note).
+uint8_t command_protocol_version(uint8_t cmd) {
+    switch (cmd) {
+        case CMD_ID_RESET_PSRAM:
+        case CMD_ID_SET_PSRAM_GRAY_16:
+        case CMD_ID_DISPLAY_PSRAM:
+        case CMD_ID_DISPLAY_PSRAM_PERSIST:
+        case CMD_ID_DISPLAY_PSRAM_TRIGGERED:
+        case CMD_ID_DISPLAY_PSRAM_GATED:
+        case CMD_ID_DISPLAY_PSRAM_DUTY:
+        case CMD_ID_DISPLAY_PSRAM_DUTY_PERSIST:
+        case CMD_ID_DISPLAY_PSRAM_DUTY_TRIGGERED:
+        case CMD_ID_DISPLAY_PSRAM_DUTY_GATED:
+            return CMD_PROTOCOL_V2;
+        default:
+            return CMD_PROTOCOL_V1;
+    }
+}
 
 const DisplayCommandsUMap DISPLAY_COMMANDS_UMAP {
     {CMD_ID_DISPLAY_GRAY_2,              0},
