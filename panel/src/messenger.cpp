@@ -4,6 +4,7 @@
 #include "constants.h"
 #include "messenger.h"
 #include "panel_spi_custom.h"
+#include "isp.h"
 #include "predef_patterns.h"
 #include "predef_patterns_table.h"
 #include "display.h"
@@ -78,6 +79,18 @@ Messenger::Messenger(queue_t &display_queue, queue_t &error_request_queue)
             [this](Message &msg){this -> on_cmd_error_display(msg);}
     });
 
+    // ISP (in-system programming) opcodes 0xE4–0xE9 — dispatched to the ISP
+    // receiver (isp.cpp), which arms an extended multi-byte CIPO reply driven on
+    // the next read transaction (see update() / panel_spi_drive_response).
+    for (uint8_t isp_cmd : { (uint8_t)CMD_ID_ISP_ENTER,
+                             (uint8_t)CMD_ID_ISP_WRITE_PAGE,
+                             (uint8_t)CMD_ID_ISP_VERIFY_STAGED,
+                             (uint8_t)CMD_ID_ISP_COMMIT,
+                             (uint8_t)CMD_ID_ISP_VERIFY_CRC,
+                             (uint8_t)CMD_ID_ISP_EXIT_REBOOT }) {
+        cmd_umap_.insert( { isp_cmd, [](Message &msg){ Isp::handle(msg); } });
+    }
+
 }
 
 void Messenger::initialize() {
@@ -98,11 +111,23 @@ void Messenger::initialize() {
     // S1.3: prime the CIPO confirmation buffer + TX FIFO with the empty-buffer
     // sentinel BEFORE the first CS falling edge from the controller.
     panel_spi_clear_confirmation();
+
+    // Reserve the ISP PSRAM staging buffer up front so ISP_ENTER is a fast
+    // handshake (no pmalloc stall in the phase-A → phase-B window). See isp.cpp.
+    Isp::init();
 }
 
 void Messenger::update() {
 
     static Message msg;
+
+    // ISP extended-reply phase: a prior ISP command armed a multi-byte CIPO
+    // reply. Drive it on this transaction (and run a due flash commit after),
+    // instead of reading a new command.
+    if (Isp::response_pending()) {
+        Isp::service_pending();
+        return;
+    }
 
 #if SPI_DIAG
     // Wall-clock gap between consecutive update() entries: detects when
@@ -184,6 +209,11 @@ void Messenger::update() {
             raise_error(PREDEF_SLOT_PE01);
         }
     }
+
+    // An ISP command armed an extended (multi-byte) CIPO reply, which is driven
+    // on the next read transaction by Isp::service_pending(). Skip the normal
+    // 3-byte confirmation arming below so it doesn't clobber the ISP reply.
+    if (Isp::response_pending()) return;
 
     // Arm the CIPO confirmation for the next transaction, only on a fully valid
     // message. A byte-mismatched COMM_CHECK arms the {header, 0xFF, 0x00}

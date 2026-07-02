@@ -145,6 +145,44 @@ void panel_spi_debug_tx(uint8_t out[3]) {
 }
 #endif
 
+void panel_spi_drive_response(const uint8_t *buf, size_t len) {
+    ensure_dma_init();
+    spi_hw_t *hw = spi_get_hw(SPI_INST);
+
+    // Start from an idle bus so we drive from byte 0 of the next transaction.
+    while (!gpio_get(SPI_CS_PIN)) { tight_loop_contents(); }
+    spi_drain_rx();
+
+    // Pre-load up to the 8-deep TX FIFO so byte 0 is shifted out on the first
+    // SCK edge (matches prime_tx_confirmation's pre-CS-fall loading).
+    size_t i = 0;
+    while (i < len && i < 8 && spi_is_writable(SPI_INST)) {
+        hw->dr = (uint32_t)buf[i++];
+    }
+
+    while (gpio_get(SPI_CS_PIN)) { tight_loop_contents(); }   // CS falling: start
+
+    // Feed the rest as the FIFO drains, then 2 filler bytes so the PL022 TX
+    // underflow can't truncate the tail of the final real byte.
+    while (i < len) {
+        while (!spi_is_writable(SPI_INST)) {
+            if (gpio_get(SPI_CS_PIN)) goto done;   // controller ended early
+            tight_loop_contents();
+        }
+        hw->dr = (uint32_t)buf[i++];
+    }
+    for (int k = 0; k < 2; ++k) {
+        while (!spi_is_writable(SPI_INST)) {
+            if (gpio_get(SPI_CS_PIN)) goto done;
+            tight_loop_contents();
+        }
+        hw->dr = 0x00;
+    }
+done:
+    while (!gpio_get(SPI_CS_PIN)) { tight_loop_contents(); }  // CS rising: end
+    spi_drain_rx();
+}
+
 void panel_spi_read(Message &msg) {
     ensure_dma_init();
 

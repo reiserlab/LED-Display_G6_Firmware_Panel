@@ -8,8 +8,8 @@
 #       monitor.sh A5D4B82BA2B9FB51     # v0.3.1 panel
 #
 # Target board is identified by USB serial number, not the device node (which
-# shifts with enumeration order). Match: VID 2e8a, product "RP2354 20x20
-# Display Panel", serial == argv[1].
+# shifts with enumeration order). Match: VID 2e8a, product "G6 Panel v0.x"
+# (per-rev usb_product in platformio.ini), serial == argv[1].
 #
 #   * Linux — resolves /dev/serial/by-id/...
 #   * macOS — resolves /dev/cu.usbmodem* by USB serial (tools/panel_port.py).
@@ -39,25 +39,28 @@ Darwin)
     ;;
 esac
 
-# Linux (original udev-by-id path).
-BY_ID_GLOB='/dev/serial/by-id/usb-Reiser_Lab_RP2354_20x20_Display_Panel_*-if00'
-TARGET_BY_ID="/dev/serial/by-id/usb-Reiser_Lab_RP2354_20x20_Display_Panel_${TARGET_SERIAL}-if00"
+# Linux (original udev-by-id path). Monitor gets only a serial (no env), so
+# glob both per-rev products (G6_Panel_v0.2 / G6_Panel_v0.3).
+BY_ID_GLOB='/dev/serial/by-id/usb-Reiser_Lab_G6_Panel_v0.*-if00'
+TARGET_BY_ID_GLOB="/dev/serial/by-id/usb-Reiser_Lab_G6_Panel_v0.*_${TARGET_SERIAL}-if00"
 
 shopt -s nullglob
 matches=( $BY_ID_GLOB )
 
 if (( ${#matches[@]} == 0 )); then
     echo "monitor: no G6 panel found in USB-serial mode." >&2
-    echo "         expected ${TARGET_BY_ID}" >&2
+    echo "         expected ${TARGET_BY_ID_GLOB}" >&2
     exit 1
 fi
 
-if [[ ! -e "$TARGET_BY_ID" ]]; then
+target_matches=( $TARGET_BY_ID_GLOB )
+if (( ${#target_matches[@]} == 0 )); then
     echo "monitor: requested panel (serial ${TARGET_SERIAL}) is not connected." >&2
     echo "         connected:" >&2
     for m in "${matches[@]}"; do echo "           $m" >&2; done
     exit 1
 fi
+TARGET_BY_ID="${target_matches[0]}"
 
 echo "monitor: attaching to $TARGET_BY_ID @ ${BAUD} baud  (Ctrl-C to exit)"
 exec "$PIO" device monitor --port "$TARGET_BY_ID" --baud "$BAUD"

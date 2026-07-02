@@ -28,6 +28,13 @@ const PayloadSizeUMap PAYLOAD_SIZE_UMAP {
     {CMD_ID_DISPLAY_GRAY_16_TRIGGERED,   PAYLOAD_DISPLAY_GRAY_16},
     {CMD_ID_DISPLAY_GRAY_16_GATED,       PAYLOAD_DISPLAY_GRAY_16},
     {CMD_ID_ERROR_DISPLAY,               PAYLOAD_ERROR_DISPLAY},
+    // ISP payloads (bytes after the 2-byte header). Must match IspController.
+    {CMD_ID_ISP_ENTER,                   20},   // sentinel(16) + token(4)
+    {CMD_ID_ISP_WRITE_PAGE,              267},  // page_idx(3)+nonce(4)+data(256)+crc32(4)
+    {CMD_ID_ISP_VERIFY_STAGED,           11},   // nonce(4)+len(3)+crc32(4)
+    {CMD_ID_ISP_COMMIT,                  7},    // nonce(4)+len(3)
+    {CMD_ID_ISP_VERIFY_CRC,              14},   // start(3)+len(3)+nonce(4)+crc32(4)
+    {CMD_ID_ISP_EXIT_REBOOT,             5},    // nonce(4)+mode(1)
 };
 
 const DisplayCommandsUMap DISPLAY_COMMANDS_UMAP {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Flash panel/ firmware to a specific G6 panel.
+# Flash panel/ firmware to a specific G6 panel identified by USB serial number.
 #
 # Usage:
 #   deploy.sh <USB_SERIAL> <PIO_ENV>
@@ -11,7 +11,7 @@
 # shifts with enumeration order) — so it is safe with multiple panels attached.
 #
 #   VID:PID         2e8a:0009   (Raspberry Pi VID, panel-firmware USB-serial PID)
-#   USB product     "RP2354 20x20 Display Panel"   (set in panel/platformio.ini)
+#   USB product     "G6 Panel v0.2" / "G6 Panel v0.3"  (set in panel/platformio.ini)
 #   serial number   passed as argv[1]
 #
 # Platform handling:
@@ -37,6 +37,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PANEL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PIO="${PIO:-pio}"
 PYTHON="${PYTHON:-/usr/bin/python3}"
+
+# Env -> USB product string (matches panel/platformio.ini usb_product per rev).
+case "$PIO_ENV" in
+    pico_v021*) PRODUCT="G6_Panel_v0.2" ;;
+    pico_v031*) PRODUCT="G6_Panel_v0.3" ;;
+    *)
+        echo "deploy: unknown env '$PIO_ENV' — expected pico_v021* or pico_v031*" >&2
+        exit 2
+        ;;
+esac
 
 # ---------------------------------------------------------------------------
 case "$(uname -s)" in
@@ -79,8 +89,8 @@ esac
 
 # ---------------------------------------------------------------------------
 # Linux (original udev-by-id path).
-BY_ID_GLOB='/dev/serial/by-id/usb-Reiser_Lab_RP2354_20x20_Display_Panel_*-if00'
-TARGET_BY_ID="/dev/serial/by-id/usb-Reiser_Lab_RP2354_20x20_Display_Panel_${TARGET_SERIAL}-if00"
+BY_ID_GLOB="/dev/serial/by-id/usb-Reiser_Lab_${PRODUCT}_*-if00"
+TARGET_BY_ID="/dev/serial/by-id/usb-Reiser_Lab_${PRODUCT}_${TARGET_SERIAL}-if00"
 
 shopt -s nullglob
 matches=( $BY_ID_GLOB )

@@ -8,7 +8,7 @@ exits non-zero.
 
 Match criteria (mirrors panel/platformio.ini USB identity):
     VID      0x2E8A   (Raspberry Pi / RP2350)
-    product  starts with "RP2354 20x20 Display Panel"
+    product  starts with "G6 Panel" (per-rev: "G6 Panel v0.2" / "G6 Panel v0.3")
     serial   == argv[1]
 
 A panel in BOOTSEL mode (mass-storage PID, no CDC serial) is intentionally not
@@ -19,7 +19,9 @@ matched — this only resolves panels currently running the firmware.
 import sys
 
 PANEL_VID = 0x2E8A
-PRODUCT_PREFIX = "RP2354 20x20 Display Panel"
+# Per-rev usb_product is "G6 Panel v0.2" / "G6 Panel v0.3" (platformio.ini);
+# match the common prefix so one resolver serves both revisions.
+PRODUCT_PREFIX = "G6 Panel"
 
 
 def main():
@@ -37,7 +39,7 @@ def main():
               if p.vid == PANEL_VID and (p.product or "").startswith(PRODUCT_PREFIX)]
     if not panels:
         print("panel_port: no G6 panel in USB-serial mode "
-              "(VID 2e8a, product 'RP2354 20x20 Display Panel')", file=sys.stderr)
+              "(VID 2e8a, product 'G6 Panel v0.x')", file=sys.stderr)
         sys.exit(1)
 
     match = [p for p in panels if p.serial_number == target]

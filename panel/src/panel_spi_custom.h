@@ -14,6 +14,13 @@ void panel_spi_read(Message &msg);
 // transaction's TX DMA so it's available before panel_spi_read runs again.
 void panel_spi_arm_confirmation(uint8_t header, uint8_t cmd, uint8_t checksum);
 
+// Drive a multi-byte reply on CIPO for one CS-asserted transaction (ISP phase
+// B). Pre-loads the TX FIFO so byte 0 is ready at the first SCK edge, then feeds
+// the rest as the FIFO drains (the FIFO is only 8 deep, so a >8-byte reply can't
+// be primed all at once). Appends 2 filler bytes to cover the PL022 underflow.
+// Used by the ISP receiver (isp.cpp) for ISP_ENTER / VERIFY replies.
+void panel_spi_drive_response(const uint8_t *buf, size_t len);
+
 // Reset the confirmation buffer to the empty-buffer sentinel
 // {0x81, 0x00, 0x00}. Called: (a) at panel boot from Messenger::initialize()
 // to prime the buffer before the controller's first transaction, (b) after a
