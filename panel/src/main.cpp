@@ -2,6 +2,7 @@
 #include "pico/util/queue.h"
 #include <hardware/clocks.h>
 #include "constants.h"
+#include "isp.h"
 #include "messenger.h"
 #include "pattern.h"
 #include "display.h"
@@ -762,6 +763,11 @@ void loop() {
     psram_selftest_step();
     delay(1);
 #else
+    // One-shot: if this is the first boot after an ISP flash, show the smiley
+    // boot indicator (isp.cpp). Runs here — not in setup() — so both cores are
+    // in steady state before any LittleFS access. The while(true) below never
+    // returns, so this executes exactly once.
+    Isp::boot_indicator_check();
     while(true){
     messenger.update();
     // Service USB CDC (TinyUSB) so Serial output actually flushes. Without this

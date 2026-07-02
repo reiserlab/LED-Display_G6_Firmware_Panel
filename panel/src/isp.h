@@ -43,6 +43,20 @@ bool response_pending();
 // is pending, in place of the normal command read.
 void service_pending();
 
+// Visual programming indicator (LAB-44). During staging the ISP receiver
+// pushes a progress bar (central 10 rows) into the display queue; after an
+// OTA install the freshly-booted image shows a smiley until first use.
+//
+// boot_indicator_check(): call ONCE from the production loop() (core 0, both
+// cores in steady state — not from setup(); LittleFS ops idle the other
+// core). Shows the smiley iff the just-flashed marker file exists.
+void boot_indicator_check();
+
+// notify_host_command(): call on the first valid host display command;
+// retires the just-flashed marker so the smiley stays gone after power
+// cycles. One-shot, cheap after the first call.
+void notify_host_command();
+
 }  // namespace Isp
 
 #endif
