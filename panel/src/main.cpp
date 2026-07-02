@@ -8,7 +8,9 @@
 #include "bcm.h"
 #include "layout.h"
 #include "display_pio.h"
+#include "display_scan_twopio.h"
 #include "predef_patterns.h"
+#include "psram_store.h"
 
 queue_t display_queue;
 queue_t error_request_queue;   // uint32_t slot indices, core 0 -> core 1
@@ -56,7 +58,9 @@ static void selftest_banner() {
     Serial.println("  Phase transitions logged on serial as [idx=N t=...ms] <desc>");
     Serial.print  ("  base_T = "); Serial.print(bcm_base_on_us, 2);
     Serial.println(" us (runtime-tunable: \"b<float>\\n\")");
-    Serial.println("  Commands: b<float>=set base_T, r<int>=set scan period (us), p<lr>,<lc>=single pixel,");
+    Serial.println("  Commands: b<float>=set base_T, r<int>=set scan period (us, 100..50000),");
+    Serial.println("            f<duty>/F<duty>=hold all-on Gray_2/Gray_16 field,");
+    Serial.println("            s<duty>/v<duty>=hold horiz/vert bright stripe on dim field, p<lr>,<lc>=single pixel,");
     Serial.println("            e<slot>=raise error glyph (slot 0=ERR, 1-5=PE01-05, 100=CE00),");
     Serial.println("            T=push Triggered all-on Gray_2 (drive GP45 with edges),");
     Serial.println("            g=push Gated checkerboard (drive GP45 level),");
@@ -67,7 +71,11 @@ static void selftest_banner() {
 static void selftest_help() {
     Serial.println("Commands:");
     Serial.println("  b<float>     set bcm_base_on_us (e.g. b2.5)");
-    Serial.println("  r<int>       set target scan period in us (100..10000; default 1000 = 1 kHz)");
+    Serial.println("  r<int>       set target scan period in us (100..50000; default 1000 = 1 kHz)");
+    Serial.println("  f<duty>      hold all-on Gray_2 field at duty_cycle (Persistent; pauses autocycle)");
+    Serial.println("  F<duty>      hold all-on Gray_16 field (intensity 15) at duty_cycle (Persistent)");
+    Serial.println("  s<duty>[,bg[,fg]]  horiz bright stripe on dim Gray_16 (bg/fg intensity 0..15; def 1,15)");
+    Serial.println("  v<duty>[,bg[,fg]]  vertical bright stripe on dim Gray_16 (e.g. v2,3,15)");
     Serial.println("  p<lr>,<lc>   light single layout pixel at (lr,lc), Gray_2 duty_cycle=255");
     Serial.println("  e<slot>      raise an error glyph (e.g., e0=ERR, e1=PE01, e100=CE00)");
     Serial.println("  T            push Triggered all-on Gray_2 pattern (V1 0x12) — drives one row per EINT rising edge on GP45");
@@ -103,6 +111,25 @@ static void build_checkerboard(Pattern &pat, uint8_t duty_cycle, DisplayMode mod
     for (size_t i = 0; i < PANEL_SIZE; i++)
         for (size_t j = 0; j < PANEL_SIZE; j++)
             pat.matrix()(i, j) = ((i + j) & 1) ? 1 : 0;
+}
+
+// One bright stripe (2 wide, intensity 15) through the middle of an otherwise
+// dim (intensity 1) Gray_16 field. LAB-43: the operator recalls this structured
+// pattern as a reliable trigger for the drifting-bright artifact, unlike a
+// uniform field. `vertical` selects a column stripe (cols 9,10) vs a row stripe
+// (rows 9,10). Global duty_cycle scales the whole thing (keep it low).
+static void build_stripe_gray16(Pattern &pat, uint8_t duty_cycle, bool vertical,
+                                uint8_t bg, uint8_t fg) {
+    pat.set_gray_level(GrayLevel::Gray_16);
+    pat.set_duty_cycle(duty_cycle);
+    pat.set_mode(DisplayMode::Persistent);
+    for (size_t i = 0; i < PANEL_SIZE; i++)
+        for (size_t j = 0; j < PANEL_SIZE; j++)
+            pat.matrix()(i, j) = bg;   // dim background
+    for (size_t k = 0; k < PANEL_SIZE; k++) {
+        if (vertical) { pat.matrix()(k, 9) = fg; pat.matrix()(k, 10) = fg; }
+        else          { pat.matrix()(9, k) = fg; pat.matrix()(10, k) = fg; }
+    }
 }
 
 static void build_gradient_gray16(Pattern &pat, uint8_t duty_cycle, DisplayMode mode) {
@@ -308,13 +335,79 @@ static void selftest_handle_serial() {
         st_last_duty_cycle = 0xFF;
         return;
     }
+    if (c == 'k') {
+        // Reclaimable-headroom benchmark. Inject simulated "free work" per row
+        // and watch scan_us respond. On v0.3.1 two-PIO the work overlaps the
+        // autonomous DMA burst (scan stays flat until inject > per-row burst);
+        // on the v0.2.1 CPU-row path every injected µs adds straight to scan
+        // time. Run on both panels and compare — this is the reclaimable
+        // core-1 headroom the two-PIO scanner exposes.
+        Serial.println("Reclaimable-headroom (Gray_2 all-on duty=255; inject = free work us/row):");
+        const uint32_t injects[] = {0, 10, 20, 40};
+        Pattern bp; build_allon_gray2(bp, 255, DisplayMode::Persistent);
+        queue_try_add(&display_queue, &bp);
+        delay(150);
+        for (size_t k = 0; k < sizeof(injects) / sizeof(injects[0]); k++) {
+            g_bench_inject_us = injects[k];
+            delay(100);
+            display_reset_scan_stats();
+            delay(500);
+            ScanStats st; display_get_scan_stats(st);
+            uint32_t avg_scan = st.count ? (st.scan_us_total / st.count) : 0;
+            Serial.print("  inject=");  Serial.print(injects[k]);
+            Serial.print(" us/row  scans="); Serial.print(st.count);
+            Serial.print("  scan-only(avg/min/max us)=");
+            Serial.print(avg_scan); Serial.print("/");
+            Serial.print(st.scan_us_min); Serial.print("/");
+            Serial.print(st.scan_us_max);
+            Serial.print("  per-row="); Serial.print(avg_scan / PANEL_SIZE);
+            Serial.println(" us");
+        }
+        g_bench_inject_us = 0;
+        st_last_idx     = -1;
+        st_last_duty_cycle = 0xFF;
+        return;
+    }
+    if (c == 'j') {
+        // Cycle-precise per-frame scan jitter (DWT CYCCNT, ~6.67 ns @ 150 MHz),
+        // finer than the 1 µs 't' stats. Jitter = (max - min) scan time over a
+        // ~1 s window. Two-PIO (DMA/PIO self-timed) should be near-flat;
+        // CPU-rows carries per-plane handshake variability.
+        Serial.println("Scan jitter (DWT; Gray_2 all-on; cyc + us/ns):");
+        const uint8_t duties[] = {64, 255};
+        uint32_t cpu = cycles_per_us ? cycles_per_us : 150;
+        for (size_t i = 0; i < sizeof(duties) / sizeof(duties[0]); i++) {
+            Pattern bp; build_allon_gray2(bp, duties[i], DisplayMode::Persistent);
+            queue_try_add(&display_queue, &bp);
+            delay(150);
+            display_reset_scan_stats();
+            delay(1000);   // ~1000 frames at the 1 kHz target
+            uint32_t cmin, cmax, cavg, ccount;
+            display_get_scan_cycle_stats(cmin, cmax, cavg, ccount);
+            uint32_t jit = (cmax >= cmin) ? (cmax - cmin) : 0;
+            Serial.print("  duty=");    Serial.print(duties[i]);
+            Serial.print("  frames=");  Serial.print(ccount);
+            Serial.print("  scan avg="); Serial.print(cavg);
+            Serial.print("cyc/");       Serial.print(cavg / cpu); Serial.print("us");
+            Serial.print("  min=");     Serial.print(cmin);
+            Serial.print("  max=");     Serial.print(cmax);
+            Serial.print("  JITTER=");  Serial.print(jit);
+            Serial.print("cyc/");       Serial.print(jit * 1000 / cpu); Serial.println("ns");
+        }
+        st_last_idx     = -1;
+        st_last_duty_cycle = 0xFF;
+        return;
+    }
     if (c == 'r') {
-        // Set target scan period in µs. Range 100..10000 (10 kHz to 100 Hz).
-        // Default is 1000 µs = 1 kHz.
+        // Set target scan period in µs. Range 100..50000 (10 kHz to 20 Hz).
+        // Default is 1000 µs = 1 kHz. The upper bound is deliberately very low
+        // (20 Hz) for the LAB-43 low-duty-artifact eye test: a slow refresh
+        // exaggerates the burst-then-dark flicker so a sweeping "phantom" event
+        // is slow enough to see its structure and photograph it.
         long v = line.substring(1).toInt();
-        if (v < 100 || v > 10000) {
+        if (v < 100 || v > 50000) {
             Serial.print("ERR: target_period_us out of range (got ");
-            Serial.print(v); Serial.println(", expected 100..10000)");
+            Serial.print(v); Serial.println(", expected 100..50000)");
             return;
         }
         display_target_period_us = (uint32_t)v;
@@ -431,9 +524,154 @@ static void selftest_handle_serial() {
         }
         return;
     }
+    if (c == 'f' || c == 'F') {
+        // Hold a uniform all-on field at a chosen duty_cycle, Persistent, and
+        // pause the autocycle so it stays up for the LAB-43 low-duty-artifact
+        // eye test. 'f' = Gray_2 (intensity 1), 'F' = Gray_16 (intensity 15).
+        // Reuses the st_singlepixel scratch buffer + pending flag (loop() pushes
+        // it while paused). Sweep with r<us> (refresh) and b<float> (base_T).
+        long v = line.substring(1).toInt();
+        if (v < 0 || v > 255) {
+            Serial.print("ERR: duty_cycle out of range (got ");
+            Serial.print(v); Serial.println(", expected 0..255)");
+            return;
+        }
+        uint8_t duty = (uint8_t)v;
+        if (c == 'f') {
+            build_allon_gray2(st_singlepixel, duty, DisplayMode::Persistent);
+        } else {
+            st_singlepixel.set_gray_level(GrayLevel::Gray_16);
+            st_singlepixel.set_duty_cycle(duty);
+            st_singlepixel.set_mode(DisplayMode::Persistent);
+            for (size_t i = 0; i < PANEL_SIZE; i++)
+                for (size_t j = 0; j < PANEL_SIZE; j++)
+                    st_singlepixel.matrix()(i, j) = 15;  // full intensity
+        }
+        autocycle_paused       = true;   // hold: stop the cycle overwriting it
+        st_singlepixel_pending = true;
+        Serial.print("hold all-on ");
+        Serial.print(c == 'F' ? "Gray_16" : "Gray_2");
+        Serial.print(" duty_cycle="); Serial.print(duty);
+        Serial.println(" (Persistent); autocycle PAUSED — 'x' to resume");
+        return;
+    }
+    if (c == 's' || c == 'v') {
+        // Hold a bright stripe on a dim Gray_16 field. 's' = horizontal row
+        // stripe, 'v' = vertical column stripe. LAB-43 structured-pattern repro.
+        // Format: <duty>[,<bg>[,<fg>]] — duty 0..255, bg/fg intensity 0..15
+        // (defaults bg=1, fg=15). E.g. "v2,3,15".
+        String rest = line.substring(1);
+        int c1 = rest.indexOf(',');
+        int c2 = (c1 >= 0) ? rest.indexOf(',', c1 + 1) : -1;
+        long dutyv = rest.toInt();
+        long bgv = (c1 >= 0) ? rest.substring(c1 + 1).toInt() : 1;
+        long fgv = (c2 >= 0) ? rest.substring(c2 + 1).toInt() : 15;
+        if (dutyv < 0 || dutyv > 255 || bgv < 0 || bgv > 15 || fgv < 0 || fgv > 15) {
+            Serial.println("ERR: expected <duty 0..255>[,<bg 0..15>[,<fg 0..15>]]");
+            return;
+        }
+        uint8_t duty = (uint8_t)dutyv;
+        build_stripe_gray16(st_singlepixel, duty, /*vertical=*/(c == 'v'),
+                            (uint8_t)bgv, (uint8_t)fgv);
+        autocycle_paused       = true;
+        st_singlepixel_pending = true;
+        Serial.print("hold ");
+        Serial.print(c == 'v' ? "vertical" : "horizontal");
+        Serial.print(" bright stripe (Gray_16, bg="); Serial.print((int)bgv);
+        Serial.print(" stripe="); Serial.print((int)fgv);
+        Serial.print(") duty_cycle="); Serial.print(duty);
+        Serial.println(" (Persistent); autocycle PAUSED — 'x' to resume");
+        return;
+    }
     Serial.print("ERR: unknown cmd '"); Serial.print(c); Serial.println("' (try ?)");
 }
 #endif // STAGE2_SELFTEST
+
+
+#if PSRAM_SELFTEST
+// =======================================================================
+// PSRAM_SELFTEST mode — single-board LAB-41 validation (no SPI master).
+// Read-back-verifies the demo store at boot and prints a PASS/FAIL banner,
+// then runs a tiny serial console:
+//   p        play the animation locally (feed 0..99 into display_queue)
+//   s / x    stop playback
+//   D<n>     dump PSRAM slot n as hex (e.g. "D42")
+//   v        re-run the read-back verify
+// =======================================================================
+static bool     pst_playing = false;
+static uint16_t pst_index   = 0;
+static uint32_t pst_last_ms = 0;
+static const uint32_t PST_FRAME_MS = 33;   // ~30 fps animation cadence
+
+static void psram_selftest_verify(bool psram_ok) {
+    Serial.println();
+    Serial.println("=== LAB-41 PSRAM SELFTEST ===");
+    if (!psram_ok) {
+        Serial.println("PSRAM SELFTEST: FAIL (pmalloc/init failed)");
+        return;
+    }
+    psram_store::VerifyResult r = psram_store::verify();
+    Serial.print("PSRAM SELFTEST: ");
+    Serial.print(r.checked - r.mismatched);
+    Serial.print("/");
+    Serial.print(r.checked);
+    Serial.print(r.mismatched == 0 ? " OK" : " MISMATCH");
+    Serial.print(" size=");
+    Serial.print((uint32_t)rp2040.getPSRAMSize());
+    Serial.print(" freeheap=");
+    Serial.println((int)rp2040.getFreePSRAMHeap());
+    Serial.println("cmds: p=play s=stop D<n>=dump v=verify");
+}
+
+static void psram_selftest_dump(uint16_t idx) {
+    const uint8_t *f = psram_store::frame_ptr(idx);
+    if (!f) {
+        Serial.print("slot ");
+        Serial.print(idx);
+        Serial.println(" out of range");
+        return;
+    }
+    Serial.print("slot ");
+    Serial.print(idx);
+    Serial.print(" [");
+    Serial.print((uint32_t)psram_store::FRAME_BYTES);
+    Serial.print("B]:");
+    uint8_t xs = 0;
+    for (size_t i = 0; i < psram_store::FRAME_BYTES; i++) {
+        if (i % 16 == 0) Serial.println();
+        if (f[i] < 0x10) Serial.print('0');
+        Serial.print(f[i], HEX);
+        Serial.print(' ');
+        xs ^= f[i];
+    }
+    Serial.println();
+    Serial.print("xor8=");
+    Serial.println(xs, HEX);
+}
+
+static void psram_selftest_serial() {
+    while (Serial.available()) {
+        int c = Serial.read();
+        if      (c == 'p')             { pst_playing = true;  Serial.println("play"); }
+        else if (c == 's' || c == 'x') { pst_playing = false; Serial.println("stop"); }
+        else if (c == 'v')             { psram_selftest_verify(psram_store::ready()); }
+        else if (c == 'D')             { psram_selftest_dump((uint16_t)Serial.parseInt()); }
+    }
+}
+
+static void psram_selftest_step() {
+    psram_selftest_serial();
+    if (!pst_playing) return;
+    uint32_t now = millis();
+    if (now - pst_last_ms < PST_FRAME_MS) return;
+    pst_last_ms = now;
+    Pattern pat;
+    if (psram_store::load(pst_index, pat, DisplayMode::Persistent)) {
+        queue_try_add(&display_queue, &pat);   // drop-on-full is fine
+    }
+    pst_index = (uint16_t)((pst_index + 1) % psram_store::FRAME_COUNT);
+}
+#endif // PSRAM_SELFTEST
 
 
 void setup() {
@@ -451,8 +689,29 @@ void setup() {
     while (!Serial && (millis() - t0) < 2000) { /* spin briefly */ }
     selftest_banner();
 #else
+    // LAB-41: load the demo animation into PSRAM before SPI ingest comes up, so
+    // a V2 "display PSRAM index" command can be served from the first frame.
+    // pmalloc failure (no PSRAM) logs FATAL to serial but does not block boot —
+    // V1 live-display still works; V2 PSRAM commands raise PE05 at dispatch time.
+    bool psram_ok = psram_store::init();
+    if (psram_ok) {
+        psram_store::generate_demo();
+    } else {
+        Serial.println("FATAL: PSRAM store init failed; V2 PSRAM display unavailable");
+    }
+#if PSRAM_SELFTEST
+    // Single-board PSRAM validation: wait briefly for USB CDC, read-back verify,
+    // print a PASS/FAIL banner. SPI ingest is intentionally NOT started so the
+    // serial console stays responsive on a bare board.
+    {
+        uint32_t t0 = millis();
+        while (!Serial && (millis() - t0) < 2000) { /* spin briefly */ }
+        psram_selftest_verify(psram_ok);
+    }
+#else
     messenger.initialize();
     Serial.println("[boot] G6 panel core0 ready (ISP firmware)");
+#endif
 #endif
 }
 
@@ -497,6 +756,11 @@ void loop() {
     // idx 5 needs ~500 Hz outer rate to drive Oneshot bright enough to see;
     // other phases idle at 50 Hz to leave CPU room.
     delay(cur_idx == 5 ? 2 : 20);
+#elif PSRAM_SELFTEST
+    // LAB-41 single-board console: serve serial cmds + local animation play.
+    // No SPI ingest; core 1 refreshes the queued Persistent frame at 1 kHz.
+    psram_selftest_step();
+    delay(1);
 #else
     while(true){
     messenger.update();
@@ -539,13 +803,22 @@ void setup1() {
     display.initialize();
 
     // Allow core 0 to park core 1 in a RAM-resident stub during an ISP flash
-    // commit (flash erase/program needs the other core out of XIP). Harmless
-    // when ISP is never used. See isp.cpp do_commit().
+    // commit (LittleFS flash erase/program needs the other core out of XIP).
+    // Harmless when ISP is never used. See isp.cpp stage_image_to_ota().
     multicore_lockout_victim_init();
 
     init_index_maps();
     precompute_scan_masks();
 
+#if PANEL_REV == 31
+    // v0.3.1: dual-PIO (rows on PIO1 + columns on PIO0) + dual-DMA scanner,
+    // replacing the v0.2.1 single-PIO-columns + CPU-GPIO-rows path.
+    if (!twopio_init()) {
+        Serial.println("FATAL: twopio_init() failed - display dark");
+        twopio_fail_dark();
+        while (true) { tight_loop_contents(); }
+    }
+#else
     if (!pio_init_program()) {
         Serial.println("FATAL: pio_init_program() failed - display dark");
         // Fail-dark: rows already HIGH (off), cols already LOW (off) from
@@ -553,6 +826,7 @@ void setup1() {
         while (true) { tight_loop_contents(); }
     }
     pio_start();
+#endif
 
     // Seed with all-off Persistent boot pattern so first scan iteration is
     // valid and the BCM engine continuously refreshes (cleaner than
@@ -561,6 +835,9 @@ void setup1() {
     Pattern boot_pat;
     boot_pat.set_mode(DisplayMode::Persistent);
     precompute_bcm_data(boot_pat);
+#if PANEL_REV == 31
+    twopio_precompute((boot_pat.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
+#endif
 }
 
 void loop1() {
