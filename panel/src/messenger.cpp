@@ -386,6 +386,13 @@ void Messenger::update() {
         if (cmd_umap_.count(cmd_id) > 0) {
             cmd_umap_.at(cmd_id)(msg);
             cmd_ok = true;
+            // First display-class command retires the ISP boot-indicator flag
+            // (the post-flash smiley). COMM_CHECK and ISP opcodes aren't
+            // "content", so they don't count.
+            if (cmd_id != CMD_ID_COMMS_CHECK &&
+                !(cmd_id >= CMD_ID_ISP_ENTER && cmd_id <= CMD_ID_ISP_EXIT_REBOOT)) {
+                Isp::notify_host_command();
+            }
         }
     }
 
