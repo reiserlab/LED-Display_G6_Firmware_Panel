@@ -10,6 +10,13 @@
 
 #include "protocol.h"
 #include "panel_spi_custom.h"
+#include "pattern.h"
+#include "pico/util/queue.h"
+
+// Display queue (core 0 -> core 1), owned by main.cpp. The ISP receiver pushes
+// Persistent progress/indicator Patterns into it exactly like Messenger does;
+// Display::update()'s drain-to-latest keeps it shallow.
+extern queue_t display_queue;
 
 namespace {
 
@@ -20,6 +27,60 @@ constexpr uint32_t kStageMax   = 2u * 1024u * 1024u;  // ≤ RP2354 2 MiB app fl
 constexpr uint16_t kPageBytes  = 256;                 // flash program granule (WRITE_PAGE)
 constexpr uint32_t kSectorBytes = 4096;               // flash erase granule (reported in ENTER reply)
 const char kImageFile[] = "/firmware.bin";            // LittleFS staging file for the OTA stub
+const char kFlashedFlag[] = "/just_flashed";          // marker: OTA staged, boot indicator due
+
+// --- Visual programming indicator (LAB-44) ----------------------------------
+// While pages stream in, the panel shows a progress bar across the central 10
+// rows (rows 5..14), filling left to right. The panel does not know the image
+// total up front (only the controller does), so the bar is scaled to a nominal
+// image size; a larger image simply wraps and refills — indeterminate fallback
+// for free. Real images (~96-140 KB -> ~380..540 pages) fill near-linearly.
+constexpr uint32_t kNominalPages = 512;  // ~128 KiB nominal image
+constexpr int      kBarRowFirst  = 5;
+constexpr int      kBarRowLast   = 14;
+constexpr uint8_t  kIndicatorDuty = 128;
+
+uint8_t bar_cols_shown_ = 0xFF;   // last pushed fill (0xFF = none this session)
+
+// 20x20 smiley, row 0 = top (same Pattern orientation the predef glyphs use).
+// Shown by boot_indicator_check() on the first boot after an ISP flash.
+const char *kSmiley[PANEL_SIZE] = {
+    "....................",
+    "....................",
+    "....................",
+    "....................",
+    ".....##......##.....",
+    ".....##......##.....",
+    "....................",
+    "....................",
+    "....................",
+    "....................",
+    "...#............#...",
+    "....#..........#....",
+    ".....#........#.....",
+    "......########......",
+    "....................",
+    "....................",
+    "....................",
+    "....................",
+    "....................",
+    "....................",
+};
+
+// Push a Persistent Gray_2 progress frame with `cols` columns lit (0..20).
+void push_progress(uint8_t cols) {
+  Pattern pat;
+  pat.set_gray_level(GrayLevel::Gray_2);
+  pat.set_duty_cycle(kIndicatorDuty);
+  pat.set_mode(DisplayMode::Persistent);
+  pat.matrix().setZero();
+  for (int r = kBarRowFirst; r <= kBarRowLast; ++r)
+    for (int c = 0; c < cols && c < PANEL_SIZE; ++c)
+      pat.matrix()(r, c) = 1;
+  queue_try_add(&display_queue, &pat);  // drop-on-full is fine (drain-to-latest)
+}
+
+// update_progress() lives below the session-state block (uses image_len_).
 
 // --- ISP session state ------------------------------------------------------
 uint8_t  *stage_       = nullptr;   // PSRAM staging buffer (pmalloc, lazy)
@@ -33,6 +94,18 @@ uint8_t  resp_len_     = 0;
 bool     resp_pending_ = false;
 bool     reboot_due_   = false;     // reboot after the COMMIT receipt clocks out
 bool     fs_ready_     = false;     // LittleFS mounted
+
+// Recompute bar fill from bytes staged so far; push only on a column change.
+void update_progress() {
+  uint32_t pages  = image_len_ / kPageBytes;
+  uint32_t filled = pages * PANEL_SIZE / kNominalPages;
+  uint8_t  shown  = (filled <= PANEL_SIZE) ? (uint8_t)filled
+                                           : (uint8_t)(filled % PANEL_SIZE);
+  if (shown != bar_cols_shown_) {
+    bar_cols_shown_ = shown;
+    push_progress(shown);
+  }
+}
 
 // CRC-8/AUTOSAR (poly 0x2F, init 0xFF, xorout 0xFF) — matches G6::crc8_autosar.
 uint8_t crc8(const uint8_t *d, size_t n) {
@@ -160,6 +233,8 @@ void handle(Message &msg) {
       nonce_ = time_us_32() ^ 0xA5A5A5A5u;          // session nonce (no RNG dep)
       armed_ = true;
       image_len_ = 0;
+      bar_cols_shown_ = 0xFF;   // new session: first WRITE_PAGE pushes a fresh bar
+                                // (no push here — the ENTER reply window is tight)
       uint8_t p[17];
       memcpy(p, &nonce_, 4);
       uint32_t fs = kStageMax;  memcpy(p + 4, &fs, 4);
@@ -184,6 +259,7 @@ void handle(Message &msg) {
       memcpy(stage_ + off, data, kPageBytes);
       if (off + kPageBytes > image_len_) image_len_ = off + kPageBytes;
       arm(0, nullptr, 0);
+      update_progress();   // throttled: pushes only when the bar gains a column
       return;
     }
 
@@ -209,9 +285,17 @@ void handle(Message &msg) {
       if (n != nonce_) { arm(2, nullptr, 0); return; }
       if (len == 0 || len > kStageMax) { arm(4, nullptr, 0); return; }
       image_len_ = len;
+      push_progress(PANEL_SIZE);     // full bar while OTA staging writes flash
       // Stage the verified image into LittleFS + an OTA command, then reboot so the
       // core's OTA stub flashes it at clean early-boot (see stage_image_to_ota).
       bool ok = stage_image_to_ota();
+      if (ok) {
+        // Marker for the freshly-flashed image: its first boot shows the smiley
+        // boot indicator (boot_indicator_check); cleared again on the first
+        // host display command (notify_host_command).
+        File f = LittleFS.open(kFlashedFlag, "w");
+        if (f) { f.write((uint8_t)'1'); f.close(); }
+      }
       arm(ok ? 0 : 8, nullptr, 0);   // status 8 = OTA staging failed
       if (ok) reboot_due_ = true;    // reboot after the receipt clocks out
       return;
@@ -240,6 +324,45 @@ void handle(Message &msg) {
     default:
       return;
   }
+}
+
+void boot_indicator_check() {
+  // Called once from the production loop() on core 0, after both cores are in
+  // steady state — never from setup(): LittleFS flash writes/format use
+  // idleOtherCore(), which hangs before core 1 services its loop.
+  //
+  // Mount WITHOUT auto-format: on a panel that has never been ISP-flashed the
+  // FS region is unformatted and must stay untouched here (formatting is
+  // ensure_fs()'s job, lazily, in ISP context).
+  LittleFSConfig cfg(false);   // autoFormat = false
+  LittleFS.setConfig(cfg);
+  if (!LittleFS.begin()) return;
+  fs_ready_ = true;
+  if (!LittleFS.exists(kFlashedFlag)) return;
+
+  // First boot after an ISP flash: show the smiley (Persistent) until the
+  // first host display command replaces it. The flag is retired on that first
+  // command (notify_host_command), so the indicator also survives power
+  // cycles until the panel is actually used.
+  Pattern pat;
+  pat.set_gray_level(GrayLevel::Gray_2);
+  pat.set_duty_cycle(kIndicatorDuty);
+  pat.set_mode(DisplayMode::Persistent);
+  pat.matrix().setZero();
+  for (int r = 0; r < PANEL_SIZE; ++r)
+    for (int c = 0; c < PANEL_SIZE; ++c)
+      if (kSmiley[r][c] == '#') pat.matrix()(r, c) = 1;
+  queue_try_add(&display_queue, &pat);
+}
+
+void notify_host_command() {
+  // First valid host display command: retire the boot-indicator flag so the
+  // smiley doesn't reappear on the next power cycle. Loop context on core 0
+  // with core 1 live — safe for a LittleFS metadata write.
+  static bool done = false;
+  if (done) return;
+  done = true;
+  if (fs_ready_ && LittleFS.exists(kFlashedFlag)) LittleFS.remove(kFlashedFlag);
 }
 
 }  // namespace Isp
