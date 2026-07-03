@@ -87,9 +87,15 @@ panel/tools/build_release.py --list` shows the current catalog.
 
 ## Flash & monitor
 
-Flashing goes through `panel/tools/g6_flash.py` (`picotool`-based — see NOTE
-below), not PlatformIO's own upload target. `flash21`/`flash31` flash EVERY
-connected panel of a rev:
+Flashing goes through `panel/tools/g6_flash.py`, not PlatformIO's own upload
+target. On Linux it's `picotool`-based (see NOTE below); on macOS it instead
+does a 1200-baud BOOTSEL touch + UF2 copy to the `/Volumes/RP2350` mount
+(picotool's libusb backend can't reliably claim a CDC interface macOS's own
+kernel driver already owns), which limits macOS to **one panel per
+invocation** — `--serial`/`--port` is required there, and `flash21`/`flash31`
+(which flash every connected panel of a rev) are Linux-only. Windows is
+unsupported. `flash21`/`flash31` flash EVERY connected panel of a rev on
+Linux:
 
 ```sh
 pixi run flash31                    # build the FULL release catalog, then flash all v0.3.1 panels
@@ -126,11 +132,12 @@ pixi run monitor -- --serial <THAT_SERIAL>
 
 Find a board's serial with `python panel/tools/monitor.py --list`.
 
-> **NOTE:** flashing needs `picotool` on PATH or in PlatformIO's package cache
+> **NOTE:** on Linux, flashing needs `picotool` on PATH or in PlatformIO's package cache
 > (`~/.platformio/packages/tool-picotool*/`, already present after any `pixi run
 > release`/`diag`, since they build via `pio`). It's **not** a conda-forge package, so
 > it isn't a pinned `pixi.toml` dependency — install it yourself only if neither
-> location has it.
+> location has it. macOS needs no extra tool beyond `pyserial` (already pulled in
+> transitively by `platformio`).
 
 ### SPI diagnostics
 

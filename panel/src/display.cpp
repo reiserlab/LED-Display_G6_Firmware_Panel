@@ -2,6 +2,7 @@
 #include "display.h"
 #include "bcm.h"
 #include "display_pio.h"
+#include "display_scan_twopio.h"
 #include "predef_patterns.h"
 #include "protocol.h"
 #include <hardware/pio.h>
@@ -56,6 +57,36 @@ static volatile uint32_t s_period_us_max     = 0;
 static volatile uint32_t s_scan_us_min       = UINT32_MAX;
 static volatile uint32_t s_scan_us_max       = 0;
 
+#if STAGE2_SELFTEST
+// Bench: per-row "free work" injection (µs) — see display.h / the 'k' command.
+volatile uint32_t g_bench_inject_us = 0;
+
+// Cycle-precise (DWT CYCCNT, ~6.67 ns @ 150 MHz) per-frame scan-time stats for
+// the 'j' jitter command — finer than the 1 µs time_us_32 stats. DWT is
+// core-local on the M33, so it is enabled lazily here on core 1 (where show()
+// runs). Ported from G6_Panels_Test_Firmware dwt_init().
+#include <hardware/structs/m33.h>
+static volatile uint32_t s_scan_cyc_min   = UINT32_MAX;
+static volatile uint32_t s_scan_cyc_max   = 0;
+static volatile uint64_t s_scan_cyc_total = 0;
+static volatile uint32_t s_scan_cyc_count = 0;
+static bool s_dwt_ready = false;
+static inline void dwt_ensure() {
+    if (s_dwt_ready) return;
+    m33_hw->demcr    |= (1UL << 24);   // TRCENA
+    m33_hw->dwt_ctrl |= (1UL << 0);    // CYCCNTENA
+    m33_hw->dwt_cyccnt = 0;
+    s_dwt_ready = true;
+}
+void display_get_scan_cycle_stats(uint32_t &cmin, uint32_t &cmax,
+                                  uint32_t &cavg, uint32_t &ccount) {
+    ccount = s_scan_cyc_count;
+    cmin   = (s_scan_cyc_min == UINT32_MAX) ? 0 : s_scan_cyc_min;
+    cmax   = s_scan_cyc_max;
+    cavg   = s_scan_cyc_count ? (uint32_t)(s_scan_cyc_total / s_scan_cyc_count) : 0;
+}
+#endif
+
 void display_reset_scan_stats() {
     s_scan_count       = 0;
     s_period_us_total  = 0;
@@ -64,6 +95,12 @@ void display_reset_scan_stats() {
     s_period_us_max    = 0;
     s_scan_us_min      = UINT32_MAX;
     s_scan_us_max      = 0;
+#if STAGE2_SELFTEST
+    s_scan_cyc_min     = UINT32_MAX;
+    s_scan_cyc_max     = 0;
+    s_scan_cyc_total   = 0;
+    s_scan_cyc_count   = 0;
+#endif
 }
 
 void display_get_scan_stats(ScanStats &out) {
@@ -175,6 +212,9 @@ void Display::update() {
             triggered_active_   = false;
         }
         precompute_bcm_data(pat_);
+#if PANEL_REV == 31
+        twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
+#endif
         if (pops > 1) frames_skipped_ += (pops - 1);
     }
 
@@ -267,6 +307,9 @@ void Display::enter_error_display(uint32_t slot) {
     oneshot_pending_      = false;     // Persistent within the error window
     triggered_active_     = false;     // suspended; will be restored on exit
     precompute_bcm_data(pat_);
+#if PANEL_REV == 31
+    twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
+#endif
     error_until_us_       = time_us_64() + ERROR_DISPLAY_DURATION_US;
     error_display_active  = true;      // single-writer; volatile suffices
 }
@@ -298,6 +341,9 @@ void Display::exit_error_display() {
     triggered_active_   = saved_triggered_active_;
     triggered_next_row_ = saved_triggered_next_row_;
     precompute_bcm_data(pat_);
+#if PANEL_REV == 31
+    twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
+#endif
 }
 
 
@@ -345,9 +391,20 @@ void Display::show_row(int r) {
     //   departure (see plan).
     // ----------------------------------------------------------------------
     uint8_t bcm_bits = (pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4;
+#if PANEL_REV == 31
+    // v0.3.1: both axes are PIO/DMA-driven — one autonomous burst scans this
+    // row through all bit-planes. Reached by Triggered (one call per EINT
+    // rising edge) and Gated (one call per row, level checked between rows).
+    twopio_scan_row(r, bcm_bits);
+#else
     PIO  pio = pio_get_instance();
     uint sm  = pio_get_sm();
 
+#if STAGE2_SELFTEST
+    // Bench: CPU-row path has no autonomous burst to overlap, so injected
+    // "free work" lands here and adds directly to this row's scan time.
+    if (g_bench_inject_us) busy_wait_us(g_bench_inject_us);
+#endif
     gpio_clr_mask64(row_on_mask[r]);   // row LOW = ON (normal polarity)
     for (int b = 0; b < bcm_bits; b++) {
         pio_sm_put_blocking(pio, sm, bcm_plane_data[r][b][0]);
@@ -374,6 +431,7 @@ void Display::show_row(int r) {
         pio_interrupt_clear(pio, 0);
     }
     gpio_set_mask64(row_on_mask[r]);   // row HIGH = OFF
+#endif
 }
 
 
@@ -390,13 +448,33 @@ void Display::show() {
     // ~260x to a useless ~4x.
 
     uint32_t t_start = time_us_32();
+#if STAGE2_SELFTEST
+    dwt_ensure();
+    uint32_t c_start = m33_hw->dwt_cyccnt;   // cycle-precise scan-time start
+#endif
 
+#if PANEL_REV == 31
+    // v0.3.1: one DMA-fed two-PIO burst per row; core 1 only arms + polls,
+    // freed from the per-bit-plane FIFO push + IRQ busy-wait of the v0.2.1 path.
+    int bcm_bits = (pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4;
+    if (!twopio_scan_frame(bcm_bits)) {
+        // Faulted frame: twopio already aborted DMA + re-primed the SMs. Skip
+        // this frame's period pad + scan-stats accounting (a timeout would skew
+        // the timing stats) and let loop1() re-enter. twopio_get_timeouts()
+        // surfaces the fault count in the SPI_DIAG dump.
+        return;
+    }
+#else
     for (int r = 0; r < PANEL_SIZE; r++) {
         show_row(r);
     }
+#endif
 
     uint32_t t_scan_end = time_us_32();
     uint32_t scan_us    = t_scan_end - t_start;
+#if STAGE2_SELFTEST
+    uint32_t scan_cyc   = m33_hw->dwt_cyccnt - c_start;   // scan-only cycles
+#endif
 
     // Pad to target period. If the scan already overran the target (e.g.,
     // Gray_16 duty_cycle=255 needs ~920 µs which is close to 1000 µs), skip
@@ -419,6 +497,12 @@ void Display::show() {
     if (period_us > s_period_us_max) s_period_us_max = period_us;
     if (scan_us   < s_scan_us_min)   s_scan_us_min   = scan_us;
     if (scan_us   > s_scan_us_max)   s_scan_us_max   = scan_us;
+#if STAGE2_SELFTEST
+    s_scan_cyc_count++;
+    s_scan_cyc_total += scan_cyc;
+    if (scan_cyc < s_scan_cyc_min) s_scan_cyc_min = scan_cyc;
+    if (scan_cyc > s_scan_cyc_max) s_scan_cyc_max = scan_cyc;
+#endif
 }
 
 

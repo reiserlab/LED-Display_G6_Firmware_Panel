@@ -47,9 +47,10 @@ and error-glyph slot indices).
 
 ## Tools (`tools/`)
 
-- `g6_flash.py` — `picotool`-based flashing (new/blank *and* running panels,
-  one or many); driven by the `flash*` pixi tasks (see parent README's Flash
-  & monitor section).
+- `g6_flash.py` — flashes new/blank *and* running panels; driven by the
+  `flash*` pixi tasks (see parent README's Flash & monitor section).
+  `picotool`-based on Linux (one or many, in parallel); on macOS a 1200-baud
+  BOOTSEL touch + UF2 copy to `/Volumes/RP2350` (one panel per invocation).
 - `build_release.py` — builds UF2 + ISP `.bin` + `manifest.json` for a
   catalog discovered from `platformio.ini` (`extends = common` -> `release`;
   `extends` another `pico_v*` env -> `diag`); the `release`/`diag` pixi

@@ -34,6 +34,8 @@ class Messenger {
         void on_cmd_display_gray_2(Message &msg);
         void on_cmd_display_gray_16(Message &msg);
         void on_cmd_error_display(Message &msg);
+        // V2 PSRAM display (0x50-0x53 implicit duty, 0x60-0x63 explicit duty).
+        void on_cmd_display_psram(Message &msg);
 
         // Rate-limited error raise. Tries to enqueue a slot index for core 1
         // to display; under sustained errors (parity storm), additional

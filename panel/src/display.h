@@ -100,4 +100,19 @@ struct ScanStats {
 void display_reset_scan_stats();
 void display_get_scan_stats(ScanStats &out);
 
+#if STAGE2_SELFTEST
+// Bench only: simulated per-row "free work" (µs) for the 'k' reclaimable-
+// headroom test. On v0.3.1 two-PIO this busy-wait overlaps the autonomous DMA
+// burst (hidden from scan time until it exceeds the per-row burst); on the
+// v0.2.1 CPU-row path it adds straight to scan time (core 1 must be present to
+// feed each bit-plane). 0 = disabled.
+extern volatile uint32_t g_bench_inject_us;
+
+// Cycle-precise (DWT CYCCNT) per-frame scan-time stats for the 'j' jitter
+// command: min/max/avg in core cycles over the frames since the last
+// display_reset_scan_stats(). Jitter = max - min.
+void display_get_scan_cycle_stats(uint32_t &cmin, uint32_t &cmax,
+                                  uint32_t &cavg, uint32_t &ccount);
+#endif
+
 #endif

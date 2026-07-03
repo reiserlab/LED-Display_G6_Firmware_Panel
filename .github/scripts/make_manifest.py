@@ -14,6 +14,13 @@ Each entry is a *selectable build*:
     default      true on exactly one entry that HAS a `uf2` (the flasher's
                  initial selection); a bin-only entry is never the default
 
+Production entries additionally carry (optional; consumed by the web console's
+ISP firmware-push flow, ignored by the UF2 flasher):
+    isp_file     footered ISP image (<slug>-isp.bin) alongside this manifest —
+                 raw flash image + 32-byte G6PANFW footer (make_isp_image.py),
+                 for arena SET_FIRMWARE_FILE (0xE0) -> g6-program-panel (0xC8)
+    isp_sha256   integrity check for isp_file
+
 Top-level version / commit / built identify the release. Adding a new build is
 purely a new matrix leg in release.yml — it flows through here automatically, so
 this stays the single extension point for future builds.

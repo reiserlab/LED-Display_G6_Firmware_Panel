@@ -148,10 +148,16 @@ def build_leg(entry: dict, out: Path) -> None:
     # WebUSB flasher only ever look at `uf2`; Arena Studio's ISP push only
     # ever looks at `bin`.
     bin_dest = out / f"{entry['slug']}.bin"
-    subprocess.run(
-        [sys.executable, str(MAKE_ISP_IMAGE), "--env", env, "--out", str(bin_dest)],
-        check=True,
-    )
+    cmd = [sys.executable, str(MAKE_ISP_IMAGE), "--env", env, "--out", str(bin_dest)]
+    # On a tagged release, GitHub Actions sets GITHUB_REF_NAME to the tag
+    # (e.g. "panel-fw-v1.0.0") — put that in the ISP footer's version field so
+    # GET_FIRMWARE_INFO reports the release, not a raw git SHA. Local/dev
+    # builds have no tag, so make_isp_image.py falls back to its git-SHA
+    # default.
+    release_tag = os.environ.get("GITHUB_REF_NAME")
+    if release_tag:
+        cmd += ["--version", release_tag]
+    subprocess.run(cmd, check=True)
     bin_digest = sha256(bin_dest)
     print(f"build-release: staged {bin_dest.name} ({bin_digest[:12]}…)")
 
