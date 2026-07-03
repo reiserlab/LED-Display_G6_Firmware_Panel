@@ -6,9 +6,10 @@ bench full of them, without a PlatformIO build environment. Built on `picotool`.
 
 Why this exists
 ---------------
-The legacy bench scripts (`deploy.sh` / `deploy_all.sh`) drive `pio ... -t upload`
-and can only see panels that are *already running* firmware (USB-serial mode), so
-they cannot touch a brand-new/blank board and `deploy_all.sh` is sequential.
+The old bench scripts `deploy.sh` / `deploy_all.sh` (retired — their functionality
+now lives here, see the `deploy*` pixi tasks) drove `pio ... -t upload` and could
+only see panels that were *already running* firmware (USB-serial mode), so they
+couldn't touch a brand-new/blank board, and `deploy_all.sh` flashed sequentially.
 `picotool` closes both gaps: it can reboot a running panel into BOOTSEL itself
 (`reboot -f -u`) and flash a board that is already in BOOTSEL — so the same code
 path handles new and old panels — and we flash many in parallel.
@@ -24,7 +25,9 @@ different binaries and the rev CANNOT be detected over USB on a blank board.
 back the panel's USB product string.
 
 Platform: Linux (enumerates via sysfs, like the existing by-id scripts). Requires
-`picotool` on PATH (e.g. `pixi run`, conda-forge `picotool`, or a system install).
+`picotool`: this tool prefers the copy PlatformIO already vendors under
+`~/.platformio/packages/tool-picotool*/` (present for anyone who ran `pixi run
+build21`/`build31`), falling back to PATH (conda-forge `picotool`, or a system install).
 
 Usage
 -----
@@ -33,6 +36,9 @@ Usage
 
     # Flash one specific board (physical USB port) with a locally built UF2:
     g6_flash.py --rev v0.2.1 --uf2 panel/.pio/build/pico_v021/firmware.uf2 --port 3-1.4
+
+    # Flash one specific bench board by USB serial number (survives port/hub moves):
+    g6_flash.py --rev v0.2.1 --uf2 panel/.pio/build/pico_v021/firmware.uf2 --serial 319A5199EE357F77
 
     # See what would happen without touching anything:
     g6_flash.py --rev v0.3.1 --dry-run
@@ -187,9 +193,11 @@ def resolve_uf2(rev: str, fw_version: str | None, local_uf2: str | None,
 
     Release layout (produced by release.yml): each release carries one UF2 per
     selectable build plus a manifest.json catalog whose entries describe
-    rev/variant/file/sha256/usb_product. We pick the entry matching `rev` AND
-    `variant` (default 'production'), download into the per-version cache, and
-    verify its sha256 against the manifest.
+    rev/variant/usb_product plus an optional nested `uf2: {file, sha256}` (and
+    `bin: {file, sha256}` for the ISP image, which we never look at here). We
+    pick the entry matching `rev` AND `variant` (default 'production') that
+    HAS a `uf2` build, download into the per-version cache, and verify its
+    sha256 against the manifest.
     """
     if local_uf2:
         p = Path(local_uf2)
@@ -210,8 +218,10 @@ def resolve_uf2(rev: str, fw_version: str | None, local_uf2: str | None,
         _download(assets["manifest.json"], manifest_path)
     manifest = json.loads(manifest_path.read_text())
 
-    # Entries predating the variant field are treated as 'production'.
-    artifacts = manifest.get("artifacts", [])
+    # Entries predating the variant field are treated as 'production'. A
+    # "bin"-only entry (no "uf2" key) is an ISP image for the arena
+    # controller, never something g6-flash can flash over USB — excluded.
+    artifacts = [a for a in manifest.get("artifacts", []) if a.get("uf2")]
     entry = next((a for a in artifacts
                   if a.get("rev") == rev and a.get("variant", "production") == variant), None)
     if not entry:
@@ -219,7 +229,7 @@ def resolve_uf2(rev: str, fw_version: str | None, local_uf2: str | None,
         sys.exit(f"g6-flash: release {tag} has no {rev}/{variant} build. "
                  f"Available: {', '.join(avail) or 'none'}")
 
-    fname = entry["file"]
+    fname = entry["uf2"]["file"]
     if fname not in assets:
         sys.exit(f"g6-flash: release {tag} is missing UF2 asset '{fname}'.")
     uf2 = cache / fname
@@ -227,7 +237,7 @@ def resolve_uf2(rev: str, fw_version: str | None, local_uf2: str | None,
         print(f"g6-flash: downloading {fname} from firmware release {tag} …")
         _download(assets[fname], uf2)
 
-    expect = entry.get("sha256")
+    expect = entry["uf2"].get("sha256")
     if expect:
         got = _sha256(uf2)
         if got != expect:
@@ -240,9 +250,51 @@ def resolve_uf2(rev: str, fw_version: str | None, local_uf2: str | None,
 # --- picotool wrappers ----------------------------------------------------------
 
 
+def find_picotool() -> str | None:
+    """Locate the picotool binary: PlatformIO's vendored copy first, else PATH.
+
+    picotool isn't a conda-forge package, so `pixi run` doesn't install it — but
+    PlatformIO already vendors a copy for anyone who has built with `pio`/`pixi run
+    build21`/`build31`. Prefer that known-good copy over whatever a system install
+    on PATH happens to be, falling back to PATH if PlatformIO hasn't fetched one.
+    """
+    for candidate in sorted(Path.home().glob(".platformio/packages/tool-picotool*/picotool")):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return shutil.which("picotool")
+
+
+def picotool_missing_message() -> str:
+    """Error text for main() when neither the PlatformIO cache nor PATH has picotool.
+
+    Steers towards pixi (this project's toolchain manager) first — `pixi run
+    build21`/`build31` fetches PlatformIO's picotool as a side effect, which is also
+    how find_picotool()'s fallback gets populated. OS package manager is offered as a
+    fallback for people without pixi; conda-forge is deliberately not suggested
+    (picotool isn't a conda-forge package).
+    """
+    where = "in PlatformIO's package cache (~/.platformio/packages/tool-picotool*/) or on PATH"
+    if shutil.which("pixi"):
+        primary = ("Run `pixi run build21` or `pixi run build31` once so PlatformIO "
+                   "fetches its own copy, then retry `pixi run flash21`/`flash31`.")
+    else:
+        primary = ("Install pixi (https://pixi.sh) — it manages this project's "
+                   "toolchain, and `pixi run build21`/`build31` will fetch picotool "
+                   "for you; then use `pixi run flash21`/`flash31`.")
+    return (f"g6-flash: 'picotool' not found {where}. {primary}\n"
+            "  Fallback without pixi: install picotool via your OS's package manager "
+            "(install steps differ between Windows/macOS/Linux).")
+
+
+_PICOTOOL_PATH: str | None = None
+
+
 def _picotool(*args: str) -> subprocess.CompletedProcess:
+    global _PICOTOOL_PATH
+    if _PICOTOOL_PATH is None:
+        _PICOTOOL_PATH = find_picotool() or "picotool"
     return subprocess.run(
-        ["picotool", *args], capture_output=True, text=True, check=False
+        [_PICOTOOL_PATH, *args], capture_output=True, text=True, check=False
     )
 
 
@@ -313,12 +365,23 @@ def flash_one(panel: Panel, rev: str, uf2: Path, execute: bool, dry_run: bool) -
 # --- CLI ------------------------------------------------------------------------
 
 
-def select_targets(panels: list[Panel], rev: str, port: str | None, force: bool) -> list[Panel]:
+def select_targets(panels: list[Panel], rev: str, port: str | None, serial: str | None,
+                   force: bool) -> list[Panel]:
     if port:
         chosen = [p for p in panels if p.port == port]
         if not chosen:
             sys.exit(f"g6-flash: no RP2350 board on port {port}. Connected: "
                      + (", ".join(p.port for p in panels) or "none"))
+        return chosen
+
+    if serial:
+        # Only a board already running firmware exposes its serial over sysfs
+        # (a blank/BOOTSEL board doesn't) — same limitation the old deploy.sh
+        # had; use --port for a blank board instead.
+        chosen = [p for p in panels if p.serial == serial]
+        if not chosen:
+            sys.exit(f"g6-flash: no RP2350 board with serial {serial}. Connected serials: "
+                     + (", ".join(p.serial for p in panels if p.serial) or "none"))
         return chosen
 
     if not panels:
@@ -358,9 +421,15 @@ def main(argv: list[str] | None = None) -> int:
                     help="flash a local UF2 instead of a published release (for firmware devs)")
     ap.add_argument("--fw-version", metavar="TAG",
                     help="firmware release tag to flash (default: latest)")
-    ap.add_argument("--port", metavar="PORT",
+    target = ap.add_mutually_exclusive_group()
+    target.add_argument("--port", metavar="PORT",
                     help="flash only the board on this sysfs USB port (e.g. 3-1.4); "
                          "default: all connected panels")
+    target.add_argument("--serial", metavar="SERIAL",
+                    help="flash only the board with this USB serial number — stable "
+                         "across which port/hub it's plugged into, but only visible on "
+                         "a board already running firmware (a blank/BOOTSEL board "
+                         "exposes no serial; use --port for that case)")
     ap.add_argument("--jobs", type=int, default=4, metavar="N",
                     help="max panels flashed in parallel (default: 4)")
     ap.add_argument("--no-exec", action="store_true",
@@ -374,9 +443,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="list connected panels and exit")
     args = ap.parse_args(argv)
 
-    if not args.dry_run and not shutil.which("picotool"):
-        sys.exit("g6-flash: 'picotool' not found on PATH. Install it (conda-forge "
-                 "'picotool', or `pixi run`) and retry.")
+    if not args.dry_run and not find_picotool():
+        sys.exit(picotool_missing_message())
 
     panels = enumerate_panels()
 
@@ -387,7 +455,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {p.label}  serial={p.serial}")
         return 0
 
-    targets = select_targets(panels, args.rev, args.port, args.force)
+    targets = select_targets(panels, args.rev, args.port, args.serial, args.force)
     uf2 = resolve_uf2(args.rev, args.fw_version, args.uf2, args.variant)
     execute = not args.no_exec
 

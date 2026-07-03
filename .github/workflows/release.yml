@@ -3,10 +3,13 @@
 # Pages, so g6-flash (CLI) and the WebUSB flasher never need a PlatformIO
 # toolchain.
 #
-# The build matrix below IS the catalog: each leg = one selectable build
-# (rev x variant). Add a debug/feature build by adding a matrix entry — it then
-# appears automatically in the flasher dropdown and as a g6-flash --variant.
-# Keep `env` names in sync with panel/platformio.ini.
+# The catalog lives in panel/tools/build_release.py, not in this workflow — the
+# `pixi run release` build step below is the SAME command a developer runs
+# locally to preview a release before tagging; it always builds BOTH the UF2
+# and the ISP .bin for every catalog entry. Add a debug/feature build by
+# adding an entry to that script's CATALOG; it flows through to the GitHub
+# Release, GitHub Pages, the flasher dropdown, and g6-flash's --variant
+# automatically via manifest.json.
 #
 # Tag a release to trigger:   git tag panel-fw-v1.0.0 && git push origin panel-fw-v1.0.0
 name: release
@@ -24,79 +27,49 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          # Production builds (deployable). v0.3.1 is the flasher's default.
-          - {env: pico_v031, rev: v0.3.1, variant: production, label: "v0.3.1 — Production", usb_product: "G6 Panel v0.3", slug: g6-panel-v0.3.1}
-          - {env: pico_v021, rev: v0.2.1, variant: production, label: "v0.2.1 — Production", usb_product: "G6 Panel v0.2", slug: g6-panel-v0.2.1}
-          # BCM self-test builds (bench / bring-up). Auto-run a visible 60 s
-          # pattern cycle + a serial console; NO SPI ingest — re-flash a
-          # production build before deploying.
-          - {env: pico_v031_bcmtest, rev: v0.3.1, variant: bcmtest, label: "v0.3.1 — BCM self-test", usb_product: "G6 Panel v0.3", slug: g6-panel-v0.3.1-bcmtest}
-          - {env: pico_v021_bcmtest, rev: v0.2.1, variant: bcmtest, label: "v0.2.1 — BCM self-test", usb_product: "G6 Panel v0.2", slug: g6-panel-v0.2.1-bcmtest}
-          # _spidiag / _psramtest stay bench-only and are intentionally NOT published.
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      # pixi.toml pins both python and platformio; installing pixi and running
+      # through it (instead of a separate pip install here) keeps CI on the
+      # exact same toolchain versions as `pixi run release`/`build21`/`build31`
+      # locally. `locked: true` fails the build if pixi.lock is stale instead
+      # of silently re-solving to different versions.
+      - uses: prefix-dev/setup-pixi@v0.10.0
         with:
-          python-version: "3.12"
+          locked: true
 
-      # PlatformIO drives the build; the panel build also runs
-      # tools/gen_predef_patterns.py (extra_scripts) and enforces the 2 MiB cap,
-      # so an oversize or broken image fails here rather than at flash time.
-      - name: Install PlatformIO
-        run: pip install "platformio>=6.1.19,<7"
-
-      - name: Build ${{ matrix.env }}
-        run: pio run -d panel -e ${{ matrix.env }}
-
-      - name: Stage ${{ matrix.slug }}.uf2 + metadata
-        run: |
-          mkdir -p dist
-          cp "panel/.pio/build/${{ matrix.env }}/firmware.uf2" "dist/${{ matrix.slug }}.uf2"
-          # Per-build metadata; make_manifest.py stitches these into the catalog.
-          sha=$(sha256sum "dist/${{ matrix.slug }}.uf2" | cut -d' ' -f1)
-          cat > "dist/artifact-${{ matrix.slug }}.json" <<EOF
-          {"rev": "${{ matrix.rev }}", "variant": "${{ matrix.variant }}",
-           "env": "${{ matrix.env }}", "label": "${{ matrix.label }}",
-           "file": "${{ matrix.slug }}.uf2", "sha256": "$sha",
-           "usb_product": "${{ matrix.usb_product }}"}
-          EOF
+      - name: Build release catalog
+        run: pixi run release
 
       - uses: actions/upload-artifact@v4
         with:
-          name: uf2-${{ matrix.slug }}
+          name: release-dist
           path: dist/*
 
   release:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4          # for .github/scripts/make_manifest.py
       - uses: actions/download-artifact@v4
         with:
+          name: release-dist
           path: incoming
-      - name: Assemble manifest.json
-        run: |
-          mkdir -p release
-          cp incoming/*/g6-panel-*.uf2 release/
-          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%MZ) \
-            python3 .github/scripts/make_manifest.py incoming release/manifest.json
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/g6-panel-*.uf2
-            release/manifest.json
+            incoming/g6-panel-*.uf2
+            incoming/g6-panel-*.bin
+            incoming/manifest.json
           fail_on_unmatched_files: true
           generate_release_notes: true
 
-  # Publish the same manifest + UF2s to THIS repo's GitHub Pages. Release-asset
-  # downloads are not CORS-accessible, so the browser flasher can't fetch() them;
-  # this Pages site and the flasher share the reiserlab.github.io origin, so it
-  # reads firmware here with no CORS. The g6-flash CLI uses the Release instead.
+  # Publish the same manifest + UF2s + ISP bins to THIS repo's GitHub Pages.
+  # Release-asset downloads are not CORS-accessible, so the browser flasher
+  # can't fetch() them; this Pages site and the flasher share the
+  # reiserlab.github.io origin, so it reads firmware here with no CORS. The
+  # g6-flash CLI uses the Release instead.
   pages:
     needs: build
     runs-on: ubuntu-latest
@@ -104,16 +77,16 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
+          name: release-dist
           path: incoming
-      - name: Assemble Pages site (manifest.json + UF2s)
+      - name: Assemble Pages site (manifest.json + UF2s + bins, not build metadata)
         run: |
           mkdir -p site
-          cp incoming/*/g6-panel-*.uf2 site/
-          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%MZ) \
-            python3 .github/scripts/make_manifest.py incoming site/manifest.json
+          cp incoming/g6-panel-*.uf2 site/
+          cp incoming/g6-panel-*.bin site/
+          cp incoming/manifest.json site/
           cat > site/index.html <<'HTML'
           <!doctype html><meta charset="utf-8"><title>G6 Panel firmware</title>
           <h1>G6 Panel firmware artifacts</h1>

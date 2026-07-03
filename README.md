@@ -61,27 +61,43 @@ pixi run platformio run -d panel -e pico_v031      # build v0.3.1 (or pico_v021)
 
 ## Flash & monitor
 
-The `deploy*` / `monitor*` pixi tasks target a board by **USB serial number**
-(robust against shifting `/dev/ttyACM*` enumeration):
+Flashing goes through `panel/tools/g6_flash.py` (`picotool`-based — see NOTE
+below), not PlatformIO's own upload target. `flash21`/`flash31` flash EVERY
+connected panel of a rev:
 
 ```sh
-pixi run deploy31a         # build + flash production firmware to the v0.3.1 board
-pixi run deploy31a-diag    # same, but the SPI_DIAG (serial diagnostics) build
-pixi run monitor31a        # open the USB-serial monitor for that board
+pixi run flash31             # build the FULL release catalog, then flash all v0.3.1 panels
+pixi run flash31-released    # flash the latest PUBLISHED release, no local build
 ```
 
-(`*21a` variants target the v0.2.1 board.)
+(`*21`/`*21-released` variants target v0.2.1.) `flash21`/`flash31` build the
+full release catalog first (`pixi run release`) and flash the resulting
+`dist/g6-panel-<rev>.uf2` — the exact bytes `pixi run release`/CI would
+publish, without needing to cut a release or have network access.
+`flash21-released`/`flash31-released` skip the local build entirely and
+flash the latest published release (just `picotool` + network needed).
 
-> **These tasks are bound to two specific physical panels** (the serial numbers
-> are hardcoded in `pixi.toml`) and will only act on those boards. To deploy to
-> a **different** panel, find its serial with
-> `ls /dev/serial/by-id/usb-Reiser_Lab_RP2354_20x20_Display_Panel_*`
-> then either add a task in `pixi.toml` or call the script directly:
+> To flash **one specific device** instead of every connected panel, build
+> the env then call `g6_flash.py` directly:
 > ```sh
-> bash panel/tools/deploy.sh <THAT_SERIAL> pico_v031
+> pixi run build21    # or build31 / build21-spidiag / build31-spidiag / etc.
+> python panel/tools/g6_flash.py --rev v0.2.1 \
+>     --uf2 panel/.pio/build/pico_v021/firmware.uf2 --serial <THAT_SERIAL>
 > ```
-> A panel stuck in BOOTSEL won't expose its serial — flash it manually with
-> `pixi run platformio run -d panel -e pico_v031 -t upload`.
+> Find a board's serial with `python panel/tools/g6_flash.py --list`. A panel
+> stuck in BOOTSEL is **not** a problem — `g6_flash.py` flashes it directly —
+> it just can't be targeted by `--serial` (a blank board exposes no serial),
+> so target it by `--port` instead (same `--list` output shows connected
+> ports).
+
+To open a serial console on one panel (cross-platform — matches by USB
+serial number via `pyserial`, then hands off to `pio device monitor`):
+
+```sh
+pixi run monitor -- --serial <THAT_SERIAL>
+```
+
+Find a board's serial with `python panel/tools/monitor.py --list`.
 
 ### SPI diagnostics
 

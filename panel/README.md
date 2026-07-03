@@ -47,8 +47,15 @@ and error-glyph slot indices).
 
 ## Tools (`tools/`)
 
-- `deploy.sh <USB_SERIAL> <PIO_ENV>` — flash a panel matched by USB serial.
-- `monitor.sh <USB_SERIAL>` — open the USB-serial monitor for a panel.
+- `g6_flash.py` — `picotool`-based flashing (new/blank *and* running panels,
+  one or many); driven by the `flash*` pixi tasks (see parent README's Flash
+  & monitor section).
+- `build_release.py` — builds the whole firmware release catalog (UF2 + ISP
+  `.bin` + `manifest.json`); the `release` pixi task.
+- `make_isp_image.py` — wraps a built firmware in the 32-byte ISP footer for
+  the arena controller's over-SPI reflashing.
+- `monitor.py` — open a serial console on a specific panel by USB serial
+  number, cross-platform; the `monitor` pixi task.
 - `gen_predef_patterns.py` — generate the predefined-pattern blob + slot header
   (run automatically as a PlatformIO pre-build script).
 
