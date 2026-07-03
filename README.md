@@ -59,15 +59,31 @@ pixi run platformio run -d panel -e pico_v031      # build v0.3.1 (or pico_v021)
 | `pico_v021_spidiag` / `pico_v031_spidiag` | `+ SPI_DIAG=1` | Production + SPI/validity-gate **serial diagnostics**. Same SPI ingest — safe to deploy — but per-1000-message `Serial` prints run on core 0 and can cost the occasional frame. |
 | `pico_v021_bcmtest` / `pico_v031_bcmtest` | `+ STAGE2_SELFTEST=1` | BCM-via-PIO visual self-test. **No SPI ingest — DO NOT DEPLOY** for bench testing; re-flash a production env first. |
 
-`pixi run release` builds+packages the two production envs (UF2 + ISP `.bin`
-+ `manifest.json`) into `dist/` — this is what CI publishes.
-`pixi run diag` does the same for the `_bcmtest`/`_spidiag` envs
-above — bench/diagnostic builds, staged into the same `dist/`, but never
-published by CI. `panel/tools/build_release.py` discovers both catalogs
-directly from `panel/platformio.ini` (by what each env `extends`), so a new
-rev or variant added there needs no change to `build_release.py`/`pixi.toml`
-to be picked up; `python panel/tools/build_release.py --list` shows the
-current catalog.
+`pixi run release` builds+packages the two production envs into `dist/`:
+
+- `dist/g6-panel-<rev>.uf2` — for the `g6-flash` CLI / WebUSB flasher / GitHub Release.
+- `dist/g6-panel-<rev>.bin` — the same firmware wrapped in a 32-byte ISP footer
+  (`{magic, version, image_crc32, image_size}`) the arena controller validates before
+  reflashing a panel over SPI (see the Modular-LED-Display repo's
+  `docs/development/g6_03-controller.md` § Panel firmware update (ISP)). Copy the
+  chosen `.bin` to the controller SD card as `/firmware/panel.bin` (the controller
+  holds a single firmware at a time).
+- `dist/manifest.json` — one entry per build, each with a `uf2: {file, sha256}`
+  and/or `bin: {file, sha256}`.
+
+This is exactly what CI publishes. `pixi run diag` does the same for the
+`_bcmtest`/`_spidiag` envs above — bench/diagnostic builds staged into the same
+`dist/`, but never published by CI.
+
+`panel/tools/build_release.py` discovers both catalogs directly from
+`panel/platformio.ini`: an env belongs to `release` if it `extends = common`, or to
+`diag` if it instead `extends` another `pico_v*` env — so a new rev or variant needs
+no change to `build_release.py`/`pixi.toml` to be picked up. `python
+panel/tools/build_release.py --list` shows the current catalog.
+
+**CAUTION:** bcmtest firmware has **no SPI ingest** — a panel ISP'd with a bcmtest
+`.bin` can no longer be reflashed over SPI afterwards. Recover it via
+`flash21-github-release`/`flash31-github-release` (USB) instead of a second ISP push.
 
 ## Flash & monitor
 
@@ -109,6 +125,12 @@ pixi run monitor -- --serial <THAT_SERIAL>
 ```
 
 Find a board's serial with `python panel/tools/monitor.py --list`.
+
+> **NOTE:** flashing needs `picotool` on PATH or in PlatformIO's package cache
+> (`~/.platformio/packages/tool-picotool*/`, already present after any `pixi run
+> release`/`diag`, since they build via `pio`). It's **not** a conda-forge package, so
+> it isn't a pinned `pixi.toml` dependency — install it yourself only if neither
+> location has it.
 
 ### SPI diagnostics
 

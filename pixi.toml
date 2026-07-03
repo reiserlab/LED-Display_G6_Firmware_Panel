@@ -6,75 +6,19 @@ platforms = ["linux-64", "osx-64", "osx-arm64", "win-64"]
 version = "0.2.0"
 
 [tasks]
-# release / diag: the ONE build pipeline (panel/tools/build_release.py),
-# split into two catalogs by what each PlatformIO env `extends` in
-# panel/platformio.ini — NOT a hardcoded list here:
-#   release -> envs that extend `common` (pico_v021, pico_v031): the
-#              deployable hardware-rev builds.
-#   diag    -> envs that extend another pico_v* env (pico_v0*_bcmtest,
-#              pico_v0*_spidiag, or any future variant): bench/diagnostic
-#              builds of a given rev.
-# `python panel/tools/build_release.py --list` shows the discovered catalog;
-# `--only <slug>` builds one entry from either group.
-# Both groups always produce BOTH formats per entry, staged into dist/:
-#   dist/g6-panel-*.uf2 — for g6-flash CLI / WebUSB flasher / GitHub Release.
-#   dist/g6-panel-*.bin — the same firmware wrapped in the 32-byte ISP footer
-#     {magic, version, image_crc32, image_size} the arena controller
-#     validates before reflashing a panel over SPI (see Modular-LED-Display
-#     docs/development/g6_03-controller.md § Panel firmware update (ISP), and
-#     webDisplayTools' Arena Studio panel-firmware push). Copy the chosen
-#     .bin to the controller SD card as /firmware/panel.bin (the controller
-#     holds a single firmware at a time).
-#   dist/manifest.json — one entry per build, each carrying both a
-#     "uf2": {file, sha256} and a "bin": {file, sha256}. release and diag
-#     stage into the SAME dist/, so running both leaves one manifest
-#     covering everything built so far.
-# release.yml (CI) only ever runs `release` — diag output is never published
-# to the GitHub Release or Pages, local-only.
-# CAUTION: bcmtest firmware has NO SPI ingest, so a panel ISP'd with a bcmtest
-# image can no longer be reflashed over SPI afterwards — recover it via
-# `flash21-github-release`/`flash31-github-release` (USB, no local rebuild
-# needed) instead of a second ISP push.
+# Build the firmware catalog into dist/ (UF2 + ISP .bin + manifest.json).
+# See README.md "Build" for how the catalog is discovered and what CI publishes.
 release = "python panel/tools/build_release.py"
 diag    = "python panel/tools/build_release.py --group diag"
 
-# To flash ONE specific device instead of every connected panel, build+package
-# just that catalog entry, then call g6_flash.py directly with --serial
-# <SERIAL> (a board already running firmware — find it with `python
-# panel/tools/g6_flash.py --list`) or --port <PORT> (works on a blank/BOOTSEL
-# board too, which exposes no serial), e.g.:
-#   python panel/tools/build_release.py --only g6-panel-v0.2.1
-#   python panel/tools/g6_flash.py --rev v0.2.1 \
-#       --uf2 dist/g6-panel-v0.2.1.uf2 --serial 319A5199EE357F77
-#
-# flash21 / flash31: build the FULL release catalog (`release` — both
-# production revs, both formats) and flash the resulting
-# dist/g6-panel-<rev>.uf2 — the exact artifact `pixi run release`/CI would
-# publish — to ALL connected panels of that rev (running or blank/BOOTSEL).
-# Verifies the exact bytes a real release would ship, without needing to cut
-# one or have network access; heavier than building one env via
-# `build_release.py --only <slug>` (as above).
-#
-# flash21-github-release / flash31-github-release: no local build at all —
-# flashes the latest PUBLISHED firmware release (downloaded via
-# manifest.json; pass --uf2 <path> to flash an arbitrary local build
-# instead) to every connected panel of that rev. The bench/fleet tool: no
-# pio/build toolchain needed, just picotool + network access.
-# NOTE: needs `picotool`, which is NOT a conda-forge package so it is not
-# pinned here. g6_flash.py prefers the copy PlatformIO already vendors at
-# ~/.platformio/packages/tool-picotool*/ (present for anyone who has run
-# `pixi run release`/`diag`, which builds via `pio` under the hood), falling
-# back to PATH. If neither is found, it points you at `pixi run release`
-# (or, without pixi, your OS package manager).
+# Flash every connected panel of a rev. See README.md "Flash & monitor".
 flash21                = { cmd = "python panel/tools/g6_flash.py --rev v0.2.1 --uf2 dist/g6-panel-v0.2.1.uf2", depends-on = ["release"] }
 flash31                = { cmd = "python panel/tools/g6_flash.py --rev v0.3.1 --uf2 dist/g6-panel-v0.3.1.uf2", depends-on = ["release"] }
 flash21-github-release = "python panel/tools/g6_flash.py --rev v0.2.1"
 flash31-github-release = "python panel/tools/g6_flash.py --rev v0.3.1"
 
-# monitor: open a serial console on a specific panel (cross-platform: matches
-# by USB serial number via pyserial, then hands off to `pio device monitor`).
-# Find a board's serial with `python panel/tools/monitor.py --list`.
-#   pixi run monitor -- --serial 319A5199EE357F77
+# Open a serial console on one panel by USB serial number. See README.md
+# "Flash & monitor".
 monitor = "python panel/tools/monitor.py"
 
 [dependencies]
