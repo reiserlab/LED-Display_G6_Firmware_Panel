@@ -34,7 +34,7 @@ try:
     from serial.tools import list_ports
 except ImportError:
     sys.exit("monitor: pyserial not found. It ships with `platformio` — run "
-             "`pixi run build21` (or any pio command) once, or `pip install pyserial`.")
+             "`pixi run release` (or any pio command) once, or `pip install pyserial`.")
 
 RP_VID = 0x2E8A          # Raspberry Pi USB vendor id (matches g6_flash.py's RP_VID)
 PID_APP = 0x0009         # running panel firmware: USB-serial device (matches g6_flash.py)

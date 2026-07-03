@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
-"""build_release — build the G6 panel firmware release catalog into dist/.
+"""build_release — build the G6 panel firmware release/diag catalog into dist/.
 
 This is what release.yml's build job runs (`pixi run release`), so a bench
 developer can preview the exact release payload (UF2s + BINs + manifest.json)
 before ever pushing a `panel-fw-v*` tag — the CI workflow and the local task
 are the same command, not two independently-maintained build paths.
 
-Run from the repo root (same convention as g6_flash.py). Delegates
-each leg's build to the matching `pixi run build21`/`build31`/`build21-bcmtest`/
-`build31-bcmtest` task (see pixi.toml) instead of invoking `pio` itself, so the
-build command for a given env is defined in exactly one place. Needs `pixi` on
-PATH — trivially true here since `pixi run release` is what launches this
-script.
+The catalog is DISCOVERED from panel/platformio.ini, not hardcoded here — see
+discover_catalog(). Run from the repo root (same convention as g6_flash.py).
+Delegates each leg's build to `pixi run pio run -d panel -e <env>` instead of
+invoking `pio` itself, so the pixi-environment activation is defined in
+exactly one place. Needs `pixi` on PATH — trivially true here since `pixi
+run release`/`diag` is what launches this script.
 
 Usage
 -----
-    pixi run release                                             # whole catalog, both formats
-    python panel/tools/build_release.py --only g6-panel-v0.3.1   # one leg, both formats
+    pixi run release                                              # release catalog, both formats
+    pixi run diag                                                 # diag catalog, both formats
+    python panel/tools/build_release.py --only g6-panel-v0.3.1    # one leg, any group
+    python panel/tools/build_release.py --list                    # show the discovered catalog
 
 Every build always gets wrapped into an ISP-footer `.bin` (via
 make_isp_image.py) for the arena controller's over-SPI panel reflashing, in
-addition to its `.uf2` — one build pipeline, one task, both formats every
-time. Both formats live on the SAME manifest.json artifact entry, as nested
-`"uf2": {"file", "sha256"}` (for g6-flash / the WebUSB flasher) and
-`"bin": {"file", "sha256"}` (for Arena Studio's / the arena controller's
-over-SPI push) — see make_manifest.py.
+addition to its `.uf2`. Both formats live on the SAME manifest.json artifact
+entry, as nested `"uf2": {"file", "sha256"}` (for g6-flash / the WebUSB
+flasher) and `"bin": {"file", "sha256"}` (for Arena Studio's / the arena
+controller's over-SPI push) — see make_manifest.py. `release` and
+`diag` both stage into the same dist/, so running both leaves one
+manifest.json covering everything built so far; CI only ever runs `release`.
 
 See docs/development/g6_07-panel-programming.md §A.
 """
@@ -32,9 +35,11 @@ See docs/development/g6_07-panel-programming.md §A.
 from __future__ import annotations
 
 import argparse
+import configparser
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -43,33 +48,75 @@ from pathlib import Path
 
 MAKE_MANIFEST = Path(".github/scripts/make_manifest.py")
 MAKE_ISP_IMAGE = Path("panel/tools/make_isp_image.py")
+PLATFORMIO_INI = Path("panel/platformio.ini")
 
-# The release catalog: one entry per selectable build. `task` names the pixi
-# task (pixi.toml) that builds `env` — the single place that command lives;
-# this script never invokes `pio` directly. Adding a build here is the single
-# extension point for the catalog itself — it flows through to the GitHub
-# Release, GitHub Pages, g6-flash's `--variant` choices, and the WebUSB
-# flasher dropdown automatically via manifest.json (a new `env` still needs
-# its own build task added to pixi.toml first).
-CATALOG = [
-    # Production builds (deployable). v0.3.1 is the flasher's default.
-    {"env": "pico_v031", "task": "build31", "rev": "v0.3.1", "variant": "production",
-     "label": "v0.3.1 — Production", "usb_product": "G6 Panel v0.3",
-     "slug": "g6-panel-v0.3.1"},
-    {"env": "pico_v021", "task": "build21", "rev": "v0.2.1", "variant": "production",
-     "label": "v0.2.1 — Production", "usb_product": "G6 Panel v0.2",
-     "slug": "g6-panel-v0.2.1"},
-    # BCM self-test builds (bench / bring-up): auto-run a visible 60 s pattern
-    # cycle + a serial console; NO SPI ingest — re-flash a production build
-    # before deploying. _spidiag / _psramtest stay bench-only and are
-    # intentionally not part of the catalog.
-    {"env": "pico_v031_bcmtest", "task": "build31-bcmtest", "rev": "v0.3.1", "variant": "bcmtest",
-     "label": "v0.3.1 — BCM self-test", "usb_product": "G6 Panel v0.3",
-     "slug": "g6-panel-v0.3.1-bcmtest"},
-    {"env": "pico_v021_bcmtest", "task": "build21-bcmtest", "rev": "v0.2.1", "variant": "bcmtest",
-     "label": "v0.2.1 — BCM self-test", "usb_product": "G6 Panel v0.2",
-     "slug": "g6-panel-v0.2.1-bcmtest"},
-]
+ENV_RE = re.compile(r"^pico_v(\d)(\d)(\d)(?:_(\w+))?$")
+
+# Cosmetic only — the display label for a known variant. Anything not listed
+# here still works (falls back to a title-cased version of the variant name);
+# this is NOT what decides catalog membership, so a new PlatformIO env never
+# needs an entry here to be discovered correctly.
+LABELS = {"bcmtest": "BCM self-test", "spidiag": "SPI diagnostics"}
+
+
+def discover_catalog() -> list[dict]:
+    """Discover the release/diag catalogs from panel/platformio.ini.
+
+    An env belongs to the catalog if its name matches `pico_v<3 digits>
+    [_variant]` and it `extends` either:
+      - `common`            -> group "release": a hardware-rev production
+                               build (rev taken from the env's own digits).
+      - another `pico_v*` env -> group "diag": a variant build of
+                               that rev (bcmtest, spidiag, or any future
+                               one — rev taken from the EXTENDED env, not
+                               re-parsed from this env's own name).
+    This is the single extension point: add a PlatformIO env with the right
+    `extends`, and it's picked up automatically here — no separate catalog
+    list to keep in sync with platformio.ini.
+    """
+    cfg = configparser.ConfigParser(interpolation=None)
+    if not cfg.read(PLATFORMIO_INI):
+        sys.exit(f"build-release: could not read {PLATFORMIO_INI}")
+
+    catalog = []
+    for section in cfg.sections():
+        if not section.startswith("env:pico_"):
+            continue
+        env = section[len("env:"):]
+        m = ENV_RE.match(env)
+        if not m:
+            print(f"build-release: skipping [{section}] — doesn't match the "
+                  "pico_v<rev>[_variant] naming convention", file=sys.stderr)
+            continue
+        d1, d2, d3, own_variant = m.groups()
+        extends = cfg.get(section, "extends", fallback="").strip()
+
+        if extends == "common":
+            group, rev, variant = "release", f"v{d1}.{d2}.{d3}", "production"
+        elif extends.startswith("env:pico_v"):
+            base_m = ENV_RE.match(extends.split(":", 1)[1])
+            if not base_m:
+                print(f"build-release: skipping [{section}] — extends "
+                      f"'{extends}', which doesn't match the naming convention",
+                      file=sys.stderr)
+                continue
+            bd1, bd2, bd3, _ = base_m.groups()
+            group, rev, variant = "diag", f"v{bd1}.{bd2}.{bd3}", own_variant or "unknown"
+        else:
+            print(f"build-release: skipping [{section}] — extends '{extends}', "
+                  "neither 'common' nor another pico_v* env", file=sys.stderr)
+            continue
+
+        usb_product = f"G6 Panel {rev[:-2]}"  # "v0.2.1" -> "G6 Panel v0.2"
+        label_text = LABELS.get(variant, variant.replace("_", " ").title())
+        slug_variant = variant.replace("_", "-")
+        slug = f"g6-panel-{rev}" if variant == "production" else f"g6-panel-{rev}-{slug_variant}"
+
+        catalog.append({
+            "env": env, "group": group, "rev": rev, "variant": variant,
+            "label": f"{rev} — {label_text}", "usb_product": usb_product, "slug": slug,
+        })
+    return catalog
 
 
 def sha256(path: Path) -> str:
@@ -82,8 +129,8 @@ def sha256(path: Path) -> str:
 
 def build_leg(entry: dict, out: Path) -> None:
     env = entry["env"]
-    print(f"build-release: building {env} (pixi run {entry['task']}) …")
-    subprocess.run(["pixi", "run", entry["task"]], check=True)
+    print(f"build-release: building {env} …")
+    subprocess.run(["pixi", "run", "pio", "run", "-d", "panel", "-e", env], check=True)
 
     # The panel build also runs tools/gen_predef_patterns.py (extra_scripts)
     # and enforces the 2 MiB cap, so an oversize/broken image fails here.
@@ -118,20 +165,37 @@ def build_leg(entry: dict, out: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Build the G6 panel firmware release catalog.")
+    ap = argparse.ArgumentParser(
+        description="Build the G6 panel firmware release/diag catalog.")
+    ap.add_argument("--group", choices=["release", "diag"], default="release",
+                     help="which catalog to build (default: release); ignored if --only is given")
     ap.add_argument("--only", metavar="SLUG",
-                     help="build only this catalog entry, by slug (fast local "
-                          "iteration); default: build the whole catalog")
+                     help="build only this catalog entry, by slug, from either group "
+                          "(fast local iteration)")
     ap.add_argument("--out", default="dist", metavar="DIR",
                      help="output directory (default: dist)")
+    ap.add_argument("--list", action="store_true",
+                     help="list the discovered catalog (env, group, slug) and exit")
     args = ap.parse_args(argv)
 
-    entries = CATALOG
+    catalog = discover_catalog()
+    if not catalog:
+        sys.exit(f"build-release: no envs discovered from {PLATFORMIO_INI}.")
+
+    if args.list:
+        for e in catalog:
+            print(f"  {e['slug']:<28} group={e['group']:<12} env={e['env']:<20} {e['label']}")
+        return 0
+
     if args.only:
-        entries = [e for e in CATALOG if e["slug"] == args.only]
+        entries = [e for e in catalog if e["slug"] == args.only]
         if not entries:
             sys.exit(f"build-release: no catalog entry '{args.only}'. "
-                      f"Available: {', '.join(e['slug'] for e in CATALOG)}")
+                      f"Available: {', '.join(e['slug'] for e in catalog)}")
+    else:
+        entries = [e for e in catalog if e["group"] == args.group]
+        if not entries:
+            sys.exit(f"build-release: no catalog entries in group '{args.group}'.")
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -139,8 +203,10 @@ def main(argv: list[str] | None = None) -> int:
         build_leg(entry, out)
 
     # manifest.json is assembled from whatever artifact-*.json is present in
-    # `out` — so `--only` on top of an existing dist/ regenerates just one
-    # leg and still produces a manifest covering everything staged so far.
+    # `out` — so `--only`, or running `release` and `diag` into the
+    # same dist/, accumulates into one manifest covering everything staged
+    # so far (CI only ever runs `release`, so the published manifest only
+    # ever sees release-group artifacts).
     env = os.environ.copy()
     env.setdefault("BUILD_DATE", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"))
     subprocess.run(

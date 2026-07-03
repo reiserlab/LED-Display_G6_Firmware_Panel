@@ -50,8 +50,10 @@ and error-glyph slot indices).
 - `g6_flash.py` — `picotool`-based flashing (new/blank *and* running panels,
   one or many); driven by the `flash*` pixi tasks (see parent README's Flash
   & monitor section).
-- `build_release.py` — builds the whole firmware release catalog (UF2 + ISP
-  `.bin` + `manifest.json`); the `release` pixi task.
+- `build_release.py` — builds UF2 + ISP `.bin` + `manifest.json` for a
+  catalog discovered from `platformio.ini` (`extends = common` -> `release`;
+  `extends` another `pico_v*` env -> `diag`); the `release`/`diag` pixi
+  tasks. `--list` shows the discovered catalog.
 - `make_isp_image.py` — wraps a built firmware in the 32-byte ISP footer for
   the arena controller's over-SPI reflashing.
 - `monitor.py` — open a serial console on a specific panel by USB serial

@@ -59,6 +59,16 @@ pixi run platformio run -d panel -e pico_v031      # build v0.3.1 (or pico_v021)
 | `pico_v021_spidiag` / `pico_v031_spidiag` | `+ SPI_DIAG=1` | Production + SPI/validity-gate **serial diagnostics**. Same SPI ingest — safe to deploy — but per-1000-message `Serial` prints run on core 0 and can cost the occasional frame. |
 | `pico_v021_bcmtest` / `pico_v031_bcmtest` | `+ STAGE2_SELFTEST=1` | BCM-via-PIO visual self-test. **No SPI ingest — DO NOT DEPLOY** for bench testing; re-flash a production env first. |
 
+`pixi run release` builds+packages the two production envs (UF2 + ISP `.bin`
++ `manifest.json`) into `dist/` — this is what CI publishes.
+`pixi run diag` does the same for the `_bcmtest`/`_spidiag` envs
+above — bench/diagnostic builds, staged into the same `dist/`, but never
+published by CI. `panel/tools/build_release.py` discovers both catalogs
+directly from `panel/platformio.ini` (by what each env `extends`), so a new
+rev or variant added there needs no change to `build_release.py`/`pixi.toml`
+to be picked up; `python panel/tools/build_release.py --list` shows the
+current catalog.
+
 ## Flash & monitor
 
 Flashing goes through `panel/tools/g6_flash.py` (`picotool`-based — see NOTE
@@ -66,23 +76,24 @@ below), not PlatformIO's own upload target. `flash21`/`flash31` flash EVERY
 connected panel of a rev:
 
 ```sh
-pixi run flash31             # build the FULL release catalog, then flash all v0.3.1 panels
-pixi run flash31-released    # flash the latest PUBLISHED release, no local build
+pixi run flash31                    # build the FULL release catalog, then flash all v0.3.1 panels
+pixi run flash31-github-release     # flash the latest PUBLISHED release, no local build
 ```
 
-(`*21`/`*21-released` variants target v0.2.1.) `flash21`/`flash31` build the
+(`*21`/`*21-github-release` variants target v0.2.1.) `flash21`/`flash31` build the
 full release catalog first (`pixi run release`) and flash the resulting
 `dist/g6-panel-<rev>.uf2` — the exact bytes `pixi run release`/CI would
 publish, without needing to cut a release or have network access.
-`flash21-released`/`flash31-released` skip the local build entirely and
-flash the latest published release (just `picotool` + network needed).
+`flash21-github-release`/`flash31-github-release` skip the local build
+entirely and flash the latest published release (just `picotool` + network
+needed).
 
-> To flash **one specific device** instead of every connected panel, build
-> the env then call `g6_flash.py` directly:
+> To flash **one specific device** instead of every connected panel,
+> build+package just that catalog entry then call `g6_flash.py` directly:
 > ```sh
-> pixi run build21    # or build31 / build21-spidiag / build31-spidiag / etc.
+> python panel/tools/build_release.py --only g6-panel-v0.2.1   # or -bcmtest / -spidiag / etc.
 > python panel/tools/g6_flash.py --rev v0.2.1 \
->     --uf2 panel/.pio/build/pico_v021/firmware.uf2 --serial <THAT_SERIAL>
+>     --uf2 dist/g6-panel-v0.2.1.uf2 --serial <THAT_SERIAL>
 > ```
 > Find a board's serial with `python panel/tools/g6_flash.py --list`. A panel
 > stuck in BOOTSEL is **not** a problem — `g6_flash.py` flashes it directly —

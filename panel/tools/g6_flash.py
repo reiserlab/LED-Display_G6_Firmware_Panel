@@ -27,7 +27,8 @@ back the panel's USB product string.
 Platform: Linux (enumerates via sysfs, like the existing by-id scripts). Requires
 `picotool`: this tool prefers the copy PlatformIO already vendors under
 `~/.platformio/packages/tool-picotool*/` (present for anyone who ran `pixi run
-build21`/`build31`), falling back to PATH (conda-forge `picotool`, or a system install).
+release`/`diag`, which build via `pio` under the hood), falling back to PATH
+(e.g. from an activated virtual environment, or a system install).
 
 Usage
 -----
@@ -43,7 +44,8 @@ Usage
     # See what would happen without touching anything:
     g6_flash.py --rev v0.3.1 --dry-run
 
-See `tools/panel-programming/README.md` and `docs/development/g6_07-panel-programming.md`.
+See `docs/development/g6_07-panel-programming.md` (Modular-LED-Display repo) and the
+parent README's "Flash & monitor" section.
 """
 
 from __future__ import annotations
@@ -255,8 +257,9 @@ def find_picotool() -> str | None:
 
     picotool isn't a conda-forge package, so `pixi run` doesn't install it — but
     PlatformIO already vendors a copy for anyone who has built with `pio`/`pixi run
-    build21`/`build31`. Prefer that known-good copy over whatever a system install
-    on PATH happens to be, falling back to PATH if PlatformIO hasn't fetched one.
+    release`/`diag`. Prefer that known-good copy over whatever a system
+    install on PATH happens to be, falling back to PATH if PlatformIO hasn't
+    fetched one.
     """
     for candidate in sorted(Path.home().glob(".platformio/packages/tool-picotool*/picotool")):
         if candidate.is_file() and os.access(candidate, os.X_OK):
@@ -268,19 +271,20 @@ def picotool_missing_message() -> str:
     """Error text for main() when neither the PlatformIO cache nor PATH has picotool.
 
     Steers towards pixi (this project's toolchain manager) first — `pixi run
-    build21`/`build31` fetches PlatformIO's picotool as a side effect, which is also
-    how find_picotool()'s fallback gets populated. OS package manager is offered as a
-    fallback for people without pixi; conda-forge is deliberately not suggested
-    (picotool isn't a conda-forge package).
+    release`/`diag` fetches PlatformIO's picotool as a side effect (they
+    build via `pio` under the hood), which is also how find_picotool()'s fallback
+    gets populated. OS package manager is offered as a fallback for people
+    without pixi; conda-forge is deliberately not suggested (picotool isn't a
+    conda-forge package).
     """
     where = "in PlatformIO's package cache (~/.platformio/packages/tool-picotool*/) or on PATH"
     if shutil.which("pixi"):
-        primary = ("Run `pixi run build21` or `pixi run build31` once so PlatformIO "
-                   "fetches its own copy, then retry `pixi run flash21`/`flash31`.")
+        primary = ("Run `pixi run release` once so PlatformIO fetches its own "
+                   "copy, then retry `pixi run flash21`/`flash31`.")
     else:
         primary = ("Install pixi (https://pixi.sh) — it manages this project's "
-                   "toolchain, and `pixi run build21`/`build31` will fetch picotool "
-                   "for you; then use `pixi run flash21`/`flash31`.")
+                   "toolchain, and `pixi run release` will fetch picotool for "
+                   "you; then use `pixi run flash21`/`flash31`.")
     return (f"g6-flash: 'picotool' not found {where}. {primary}\n"
             "  Fallback without pixi: install picotool via your OS's package manager "
             "(install steps differ between Windows/macOS/Linux).")

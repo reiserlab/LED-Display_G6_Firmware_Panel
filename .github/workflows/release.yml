@@ -3,13 +3,16 @@
 # Pages, so g6-flash (CLI) and the WebUSB flasher never need a PlatformIO
 # toolchain.
 #
-# The catalog lives in panel/tools/build_release.py, not in this workflow — the
-# `pixi run release` build step below is the SAME command a developer runs
-# locally to preview a release before tagging; it always builds BOTH the UF2
-# and the ISP .bin for every catalog entry. Add a debug/feature build by
-# adding an entry to that script's CATALOG; it flows through to the GitHub
-# Release, GitHub Pages, the flasher dropdown, and g6-flash's --variant
-# automatically via manifest.json.
+# The catalog isn't hardcoded here or in build_release.py — it's discovered
+# from panel/platformio.ini (envs that `extends = common`; see that script's
+# discover_catalog()). The `pixi run release` build step below is the SAME
+# command a developer runs locally to preview a release before tagging; it
+# always builds BOTH the UF2 and the ISP .bin for every entry. Add a new
+# hardware rev by adding a `[env:pico_v0XX]` extending `common` to
+# platformio.ini — it flows through to the GitHub Release, GitHub Pages, the
+# flasher dropdown, and g6-flash's --variant automatically via manifest.json.
+# (Bench/diagnostic envs that extend another pico_v* env instead go to the
+# separate `diag` task, which this workflow never runs.)
 #
 # Tag a release to trigger:   git tag panel-fw-v1.0.0 && git push origin panel-fw-v1.0.0
 name: release
@@ -32,9 +35,9 @@ jobs:
 
       # pixi.toml pins both python and platformio; installing pixi and running
       # through it (instead of a separate pip install here) keeps CI on the
-      # exact same toolchain versions as `pixi run release`/`build21`/`build31`
-      # locally. `locked: true` fails the build if pixi.lock is stale instead
-      # of silently re-solving to different versions.
+      # exact same toolchain versions as `pixi run release` locally. `locked:
+      # true` fails the build if pixi.lock is stale instead of silently
+      # re-solving to different versions.
       - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           locked: true
