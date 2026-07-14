@@ -566,9 +566,9 @@ def main(argv: list[str] | None = None) -> int:
                "limit is post-flash LED-matrix inrush + USB re-enumeration, not flashing.\n"
                "For larger trays use --no-exec, then power-cycle in small groups.",
     )
-    ap.add_argument("--rev", required=True, choices=sorted(REVS),
-                    help="panel hardware revision (MANDATORY — selects the binary; "
-                         "cannot be auto-detected on a blank board)")
+    ap.add_argument("--rev", choices=sorted(REVS),
+                    help="panel hardware revision (MANDATORY unless --list; selects "
+                         "the binary; cannot be auto-detected on a blank board)")
     ap.add_argument("--variant", default="production", metavar="NAME",
                     help="firmware build variant to flash (default: production; "
                          "e.g. 'bcmtest' for the BCM self-test build)")
@@ -597,6 +597,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--list", action="store_true",
                     help="list connected panels and exit")
     args = ap.parse_args(argv)
+    if not args.list and not args.rev:
+        ap.error("--rev is required unless --list is given")
 
     if not IS_MACOS and not args.dry_run and not find_picotool():
         sys.exit(picotool_missing_message())

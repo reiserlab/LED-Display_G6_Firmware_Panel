@@ -111,12 +111,10 @@ def default_version(repo: Path) -> str:
 def encode_version(version: str) -> bytes:
     raw = version.encode("ascii", errors="replace")
     if len(raw) >= VERSION_FIELD_LEN:
-        print(
-            f"warning: version '{version}' exceeds {VERSION_FIELD_LEN - 1} chars; "
-            "truncating",
-            file=sys.stderr,
+        sys.exit(
+            f"error: version '{version}' exceeds {VERSION_FIELD_LEN - 1} chars "
+            "(would be truncated in the ISP footer)"
         )
-        raw = raw[:VERSION_FIELD_LEN - 1]
     return raw.ljust(VERSION_FIELD_LEN, b"\x00")
 
 
