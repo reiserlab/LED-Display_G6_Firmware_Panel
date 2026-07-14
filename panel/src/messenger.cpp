@@ -200,6 +200,16 @@ void diag_heartbeat() {
         (unsigned long)rmx_us, (unsigned long)rmx_row,
         (unsigned long)rall_us, (unsigned long)rall_row));
 
+    // Live pin-level snapshot as its own SHORT line (diag_emit clamps writes
+    // to ~159 bytes — gh-16 item 2 — so this cannot ride on the HB line).
+    // Input synchronizers read the pad regardless of funcsel: v0.3.1 cols
+    // GP0-19, rows GP20-39. Rows are active-LOW = ON; cols HIGH = ON.
+    uint64_t gpins = gpio_get_all64();
+    char b2[64];
+    diag_emit(b2, snprintf(b2, sizeof(b2), "PINS r=%05lX c=%05lX\r\n",
+        (unsigned long)((gpins >> 20) & 0xFFFFFu),
+        (unsigned long)(gpins & 0xFFFFFu)));
+
     hb_last_ms = now; hb_last_msgs = diag_msgs; hb_last_reject = diag_reject_any;
     hb_last_skip = skip_t; hb_last_to = to_t;
     display_reset_scan_stats();            // fresh min/max window

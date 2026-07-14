@@ -19,9 +19,12 @@ class Display {
         void show_gated();
 
         // Drive a single row × all bit-planes of the current pat_. Used by
-        // both show() (in the 20-row loop) and the V1 Triggered state
-        // machine (one call per EINT rising edge).
-        void show_row(int r);
+        // both show_gated() (in its 20-row loop) and the V1 Triggered state
+        // machine (one call per EINT rising edge). Returns false if the row
+        // faulted (two-PIO completion-poll timeout, PANEL_REV==31 only) so
+        // Triggered can retry the same row on the next edge instead of
+        // silently advancing past it (next-steps-pr-15.md #1 / gh-16 #1).
+        bool show_row(int r);
 
         // S2.2: counters surfaced in Messenger serial heartbeat.
         uint32_t frames_skipped() const { return frames_skipped_; }

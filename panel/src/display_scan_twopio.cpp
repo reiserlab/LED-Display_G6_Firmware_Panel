@@ -102,7 +102,11 @@ static uint32_t row_data[PANEL_SIZE * 2];
 
 // Per-row completion-poll timeout. A full-duty Gray_16 row burst is ~50 us;
 // 2 ms is a generous backstop that only fires on a genuine SM/DMA hang.
+// Overridable via build_flags (see pico_v031_twopiotimeouttest in
+// platformio.ini) to force the timeout path for repro testing.
+#ifndef TWOPIO_ROW_TIMEOUT_US
 #define TWOPIO_ROW_TIMEOUT_US 2000u
+#endif
 
 uint32_t twopio_get_timeouts() { return scan_timeouts; }
 
@@ -167,17 +171,38 @@ static void twopio_release_resources() {
 // all-OFF masks (consumed into Y), leaving both SMs stalled at wrap_target
 // (pull block) ready for the first per-row DMA word. Used at init and to
 // recover from a completion-poll timeout.
+//
+// next-steps-pr-15.md #1: a row/col aborted mid-hold is left driven at
+// whatever level it had when the timeout fired. Merely pushing the all-off
+// word only latches it into Y/OSR for the *next* row's end-of-hold
+// restore (addr 7-8, `mov osr,y; out pins,20`) — it doesn't touch the pins
+// now. So each axis's all-off level is asserted immediately here via an
+// injected `pull` + `out pins` (pio_sm_exec() runs instructions even while
+// the SM is disabled — same mechanism the SDK's pio_sm_set_pins() uses).
+// The injected `out` goes through the SM's own out-pin mapping (the one
+// that demonstrably drives the panel during normal scanning), updating the
+// PIO's output latch for real. Do NOT try to do this via SIO + funcsel
+// round-trip instead: switching funcsel back to PIO reverts the pad to the
+// PIO's stale output latch, undoing the SIO-forced level.
 static void twopio_prime() {
     pio_sm_set_enabled(row_pio, row_sm, false);
     pio_sm_set_enabled(col_pio, col_sm, false);
     pio_sm_clear_fifos(row_pio, row_sm);
     pio_sm_clear_fifos(col_pio, col_sm);
+
+    pio_sm_put_blocking(row_pio, row_sm, 0xFFFFFu);   // all rows OFF (HIGH)
+    pio_sm_exec(row_pio, row_sm, pio_encode_pull(false, true));
+    pio_sm_exec(row_pio, row_sm, pio_encode_out(pio_pins, PANEL_SIZE));
+    pio_sm_put_blocking(col_pio, col_sm, 0x00000u);   // all cols OFF (LOW)
+    pio_sm_exec(col_pio, col_sm, pio_encode_pull(false, true));
+    pio_sm_exec(col_pio, col_sm, pio_encode_out(pio_pins, PANEL_SIZE));
+
     pio_sm_exec(row_pio, row_sm, pio_encode_jmp(row_off));
     pio_sm_exec(col_pio, col_sm, pio_encode_jmp(col_off));
     pio_sm_set_enabled(row_pio, row_sm, true);
     pio_sm_set_enabled(col_pio, col_sm, true);
-    pio_sm_put_blocking(row_pio, row_sm, 0xFFFFFu);   // all rows OFF (HIGH)
-    pio_sm_put_blocking(col_pio, col_sm, 0x00000u);   // all cols OFF (LOW)
+    pio_sm_put_blocking(row_pio, row_sm, 0xFFFFFu);   // primes Y for the next row's restore
+    pio_sm_put_blocking(col_pio, col_sm, 0x00000u);
 }
 
 // ---------------------------------------------------------------------------
