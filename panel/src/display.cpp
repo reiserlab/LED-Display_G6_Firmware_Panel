@@ -535,10 +535,16 @@ void Display::show_gated() {
     // let update() see EINT LOW and not call show_gated() again. LEDs
     // are already OFF for any rows that didn't fire and rows that DID
     // fire have already had their row pin set HIGH=OFF by show_row's exit.
+    //
+    // On a row fault (two-PIO completion-poll timeout, gh-16 #1): same
+    // abort-and-skip-pad shape. twopio's self-heal already drove the pins
+    // dark; the next update() re-enters show_gated() (EINT still HIGH) and
+    // rescans from row 0, so the faulted row is retried rather than
+    // silently skipped for the rest of this pass.
     uint32_t t_start = time_us_32();
     for (int r = 0; r < PANEL_SIZE; r++) {
         if (!eint_high()) return;
-        show_row(r);
+        if (!show_row(r)) return;
     }
     // Full scan completed. Pad to target period — LEDs are OFF during the
     // pad (last row's row-OFF already ran), so this neither delays the

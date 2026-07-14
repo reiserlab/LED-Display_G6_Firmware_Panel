@@ -202,13 +202,19 @@ void diag_heartbeat() {
 
     // Live pin-level snapshot as its own SHORT line (diag_emit clamps writes
     // to ~159 bytes — gh-16 item 2 — so this cannot ride on the HB line).
-    // Input synchronizers read the pad regardless of funcsel: v0.3.1 cols
-    // GP0-19, rows GP20-39. Rows are active-LOW = ON; cols HIGH = ON.
+    // Input synchronizers read the pad regardless of funcsel. Bit i of each
+    // field is ROW_PIN[i]/COL_PIN[i]'s level, so the output is correct for
+    // both revisions (v0.2.1's pins are neither contiguous nor 0-based).
+    // Rows are active-LOW = ON; cols HIGH = ON.
     uint64_t gpins = gpio_get_all64();
+    uint32_t pin_rows = 0, pin_cols = 0;
+    for (int i = 0; i < PANEL_SIZE; i++) {
+        pin_rows |= (uint32_t)((gpins >> ROW_PIN[i]) & 1u) << i;
+        pin_cols |= (uint32_t)((gpins >> COL_PIN[i]) & 1u) << i;
+    }
     char b2[64];
     diag_emit(b2, snprintf(b2, sizeof(b2), "PINS r=%05lX c=%05lX\r\n",
-        (unsigned long)((gpins >> 20) & 0xFFFFFu),
-        (unsigned long)(gpins & 0xFFFFFu)));
+        (unsigned long)pin_rows, (unsigned long)pin_cols));
 
     hb_last_ms = now; hb_last_msgs = diag_msgs; hb_last_reject = diag_reject_any;
     hb_last_skip = skip_t; hb_last_to = to_t;
