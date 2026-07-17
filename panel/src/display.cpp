@@ -254,8 +254,13 @@ void Display::update() {
                     timed_out = true;
                     break;
                 }
-                show_row(triggered_next_row_);
-                triggered_next_row_++;
+                // next-steps-pr-15.md #1 / gh-16 #1: a faulted row must not
+                // silently advance the row counter — that would consume the
+                // EINT edge without the row ever actually displaying. Retry
+                // the SAME row on the next edge instead.
+                if (show_row(triggered_next_row_)) {
+                    triggered_next_row_++;
+                }
             }
             if (timed_out || triggered_next_row_ >= PANEL_SIZE) {
                 triggered_active_ = false;
@@ -347,11 +352,16 @@ void Display::exit_error_display() {
 }
 
 
-void Display::show_row(int r) {
+bool Display::show_row(int r) {
     // Drive one row × all bit-planes for the current pat_. Called by:
-    //   - show() in the 20-row loop (Oneshot, Persistent, error-display)
+    //   - show()'s CPU-driven loop (v0.2.1 / PANEL_REV != 31 only; the
+    //     PANEL_REV==31 path calls twopio_scan_frame() directly instead)
     //   - show_gated() in the 20-row loop with per-row EINT check
     //   - V1 Triggered: one call per EINT rising edge
+    //
+    // Returns false if the row faulted (two-PIO completion-poll timeout,
+    // PANEL_REV==31 only; always true on the CPU-driven v0.2.1 path outside
+    // STAGE2_SELFTEST, which has no bounded failure mode in production).
     //
     //   N = 1 for Gray_2 (single weight-15 plane)
     //   N = 4 for Gray_16 (weights {1, 2, 4, 8})
@@ -395,7 +405,7 @@ void Display::show_row(int r) {
     // v0.3.1: both axes are PIO/DMA-driven — one autonomous burst scans this
     // row through all bit-planes. Reached by Triggered (one call per EINT
     // rising edge) and Gated (one call per row, level checked between rows).
-    twopio_scan_row(r, bcm_bits);
+    return twopio_scan_row(r, bcm_bits);
 #else
     PIO  pio = pio_get_instance();
     uint sm  = pio_get_sm();
@@ -422,7 +432,7 @@ void Display::show_row(int r) {
                     Serial.print(" plane=");
                     Serial.println(b);
                     pio_sm_set_enabled(pio, sm, false);
-                    return;
+                    return false;
                 }
             }
         #else
@@ -431,6 +441,7 @@ void Display::show_row(int r) {
         pio_interrupt_clear(pio, 0);
     }
     gpio_set_mask64(row_on_mask[r]);   // row HIGH = OFF
+    return true;
 #endif
 }
 
@@ -524,10 +535,16 @@ void Display::show_gated() {
     // let update() see EINT LOW and not call show_gated() again. LEDs
     // are already OFF for any rows that didn't fire and rows that DID
     // fire have already had their row pin set HIGH=OFF by show_row's exit.
+    //
+    // On a row fault (two-PIO completion-poll timeout, gh-16 #1): same
+    // abort-and-skip-pad shape. twopio's self-heal already drove the pins
+    // dark; the next update() re-enters show_gated() (EINT still HIGH) and
+    // rescans from row 0, so the faulted row is retried rather than
+    // silently skipped for the rest of this pass.
     uint32_t t_start = time_us_32();
     for (int r = 0; r < PANEL_SIZE; r++) {
         if (!eint_high()) return;
-        show_row(r);
+        if (!show_row(r)) return;
     }
     // Full scan completed. Pad to target period — LEDs are OFF during the
     // pad (last row's row-OFF already ran), so this neither delays the
