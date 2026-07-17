@@ -6,9 +6,10 @@ bench full of them, without a PlatformIO build environment. Built on `picotool`.
 
 Why this exists
 ---------------
-The legacy bench scripts (`deploy.sh` / `deploy_all.sh`) drive `pio ... -t upload`
-and can only see panels that are *already running* firmware (USB-serial mode), so
-they cannot touch a brand-new/blank board and `deploy_all.sh` is sequential.
+The old bench scripts `deploy.sh` / `deploy_all.sh` (retired — their functionality
+now lives here, see the `deploy*` pixi tasks) drove `pio ... -t upload` and could
+only see panels that were *already running* firmware (USB-serial mode), so they
+couldn't touch a brand-new/blank board, and `deploy_all.sh` flashed sequentially.
 `picotool` closes both gaps: it can reboot a running panel into BOOTSEL itself
 (`reboot -f -u`) and flash a board that is already in BOOTSEL — so the same code
 path handles new and old panels — and we flash many in parallel.
@@ -23,8 +24,23 @@ different binaries and the rev CANNOT be detected over USB on a blank board.
 `--rev` is therefore mandatory, and every flash is verified afterwards by reading
 back the panel's USB product string.
 
-Platform: Linux (enumerates via sysfs, like the existing by-id scripts). Requires
-`picotool` on PATH (e.g. `pixi run`, conda-forge `picotool`, or a system install).
+Platform: Linux and macOS.
+
+Linux enumerates via sysfs (like the retired by-id scripts) and flashes with
+`picotool`: this tool prefers the copy PlatformIO already vendors under
+`~/.platformio/packages/tool-picotool*/` (present for anyone who ran `pixi run
+release`/`diag`, which build via `pio` under the hood), falling back to PATH
+(e.g. from an activated virtual environment, or a system install).
+
+macOS doesn't use picotool at all: its libusb backend can't reliably claim a
+CDC interface macOS's own kernel driver already owns. Instead this ports the
+retired `deploy.sh`'s macOS mechanism verbatim: a 1200-baud BOOTSEL touch
+(the earlephilhower/Arduino convention for a buttonless reset), then a plain
+UF2 copy to the `/Volumes/RP2350` mass-storage mount. That mount can't
+disambiguate multiple simultaneous boards, so macOS flashes exactly ONE panel
+per invocation (`--serial` or `--port`) — no "flash every connected panel of
+a rev", no parallel batch, no `--no-exec`. Windows is unsupported on both
+paths.
 
 Usage
 -----
@@ -34,10 +50,14 @@ Usage
     # Flash one specific board (physical USB port) with a locally built UF2:
     g6_flash.py --rev v0.2.1 --uf2 panel/.pio/build/pico_v021/firmware.uf2 --port 3-1.4
 
+    # Flash one specific bench board by USB serial number (survives port/hub moves):
+    g6_flash.py --rev v0.2.1 --uf2 panel/.pio/build/pico_v021/firmware.uf2 --serial 319A5199EE357F77
+
     # See what would happen without touching anything:
     g6_flash.py --rev v0.3.1 --dry-run
 
-See `tools/panel-programming/README.md` and `docs/development/g6_07-panel-programming.md`.
+See `docs/development/g6_07-panel-programming.md` (Modular-LED-Display repo) and the
+parent README's "Flash & monitor" section.
 """
 
 from __future__ import annotations
@@ -61,6 +81,9 @@ RP_VID = "2e8a"  # Raspberry Pi USB vendor id (board_build...usb_vid = 0x2E8A)
 PID_APP = "0009"  # running panel firmware: USB-serial device
 PID_BOOTSEL = "000f"  # RP2350 bootrom: USB mass-storage / PICOBOOT
 
+IS_MACOS = sys.platform == "darwin"
+UF2_MOUNT = Path("/Volumes/RP2350")  # macOS: RP2350 BOOTSEL mass-storage mount point
+
 # rev -> (PlatformIO env, USB product string prefix). Product strings are
 # "G6 Panel v0.2" / "G6 Panel v0.3" (major.minor only) — match by prefix, the
 # same way deploy.sh maps env -> product.
@@ -82,16 +105,22 @@ REENUMERATE_POLL_S = 0.25
 
 @dataclass
 class Panel:
-    """A connected RP2350 board, keyed by its stable physical USB port path.
+    """A connected RP2350 board.
 
-    The port path (sysfs dir name, e.g. "3-1.4") survives the BOOTSEL<->app
-    re-enumeration, so we use it as the device identity. bus/address (USB
-    busnum/devnum) are what picotool targets and change on re-enumeration.
+    Linux: `port` is the sysfs dir name (e.g. "3-1.4"), which survives the
+    BOOTSEL<->app re-enumeration, so it's the device identity; bus/address
+    (USB busnum/devnum) are what picotool targets and change on
+    re-enumeration.
+
+    macOS: `port` is either the pyserial device path (e.g.
+    "/dev/cu.usbmodem1101") for a board running firmware, or the literal
+    string "/Volumes/RP2350" for the one BOOTSEL/blank board currently
+    mounted (bus/address are unused there — set to -1).
     """
 
-    port: str  # sysfs port path, e.g. "3-1.4" — stable across re-enumeration
-    bus: int  # USB bus number (picotool --bus)
-    address: int  # USB device address (picotool --address)
+    port: str
+    bus: int  # USB bus number (picotool --bus); -1 on macOS (unused)
+    address: int  # USB device address (picotool --address); -1 on macOS (unused)
     pid: str  # "0009" (app) or "000f" (bootsel)
     serial: str | None = None
     product: str | None = None
@@ -103,6 +132,8 @@ class Panel:
     @property
     def label(self) -> str:
         what = self.product or ("BOOTSEL" if self.in_bootsel else "?")
+        if self.address < 0:
+            return f"{self.port} ({what})"
         return f"port {self.port} (bus {self.bus} addr {self.address}, {what})"
 
 
@@ -115,9 +146,13 @@ def _read(path: Path) -> str | None:
 
 def enumerate_panels() -> list[Panel]:
     """Find all connected RP2350 boards (running firmware OR in BOOTSEL)."""
+    return _enumerate_macos() if IS_MACOS else _enumerate_linux()
+
+
+def _enumerate_linux() -> list[Panel]:
     root = Path("/sys/bus/usb/devices")
     if not root.is_dir():
-        sys.exit("g6-flash: /sys/bus/usb/devices not found — this tool is Linux-only.")
+        sys.exit("g6-flash: /sys/bus/usb/devices not found — this tool supports Linux and macOS only.")
 
     panels: list[Panel] = []
     for dev in sorted(root.iterdir()):
@@ -143,8 +178,35 @@ def enumerate_panels() -> list[Panel]:
     return panels
 
 
+def _pyserial_list_ports():
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        sys.exit("g6-flash: pyserial not found (needed on macOS). It ships with "
+                  "`platformio` — run `pixi run release` once, or `pip install pyserial`.")
+    return list_ports.comports()
+
+
+def _enumerate_macos() -> list[Panel]:
+    """Boards running firmware (via pyserial, same match as monitor.py) plus a
+    synthetic BOOTSEL entry if /Volumes/RP2350 is mounted. macOS has no
+    equivalent of Linux's stable sysfs port path, so at most one BOOTSEL/blank
+    board is representable at a time — mirrors the retired deploy.sh's own
+    limitation.
+    """
+    panels = [
+        Panel(port=p.device, bus=-1, address=-1, pid=PID_APP,
+              serial=p.serial_number, product=p.product)
+        for p in _pyserial_list_ports()
+        if p.vid == int(RP_VID, 16) and p.pid == int(PID_APP, 16)
+    ]
+    if UF2_MOUNT.is_dir():
+        panels.append(Panel(port=str(UF2_MOUNT), bus=-1, address=-1, pid=PID_BOOTSEL))
+    return panels
+
+
 def wait_for_port(port: str, want_pid: str | None, timeout: float) -> Panel | None:
-    """Poll sysfs until the panel on `port` reappears (optionally in want_pid)."""
+    """Poll until the panel on `port` reappears (optionally in want_pid)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for p in enumerate_panels():
@@ -152,6 +214,56 @@ def wait_for_port(port: str, want_pid: str | None, timeout: float) -> Panel | No
                 return p
         time.sleep(REENUMERATE_POLL_S)
     return None
+
+
+def macos_wait_for_serial(serial: str, timeout: float) -> Panel | None:
+    """Like wait_for_port(), but by USB serial — macOS device paths aren't
+    stable across the BOOTSEL<->app re-enumeration, so post-flash
+    verification keys off the serial known from before the flash instead."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for p in _pyserial_list_ports():
+            if p.vid == int(RP_VID, 16) and p.pid == int(PID_APP, 16) and p.serial_number == serial:
+                return Panel(port=p.device, bus=-1, address=-1, pid=PID_APP,
+                             serial=p.serial_number, product=p.product)
+        time.sleep(REENUMERATE_POLL_S)
+    return None
+
+
+def macos_touch_1200(port: str) -> None:
+    """DTR-toggle 1200-baud touch — the earlephilhower/Arduino convention for
+    forcing a running board into BOOTSEL without a button press."""
+    import serial as pyserial
+    p = pyserial.Serial(port, 1200)
+    p.setDTR(False)
+    time.sleep(0.3)
+    p.close()
+
+
+def macos_wait_for_mount(timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if UF2_MOUNT.is_dir():
+            return True
+        time.sleep(REENUMERATE_POLL_S)
+    return False
+
+
+def macos_copy_uf2(uf2: Path) -> None:
+    """Plain copy, not `cp -X` — macOS 15's FSKit msdos driver rejects cp -X's
+    extended-attribute handling on the RP2350 volume with a spurious
+    "Permission denied", and also rejects a copy immediately after mount (volume
+    not write-ready yet) — so retry. Ports the retired deploy.sh's workaround."""
+    last: OSError | None = None
+    for _ in range(20):
+        try:
+            shutil.copyfile(uf2, UF2_MOUNT / uf2.name)
+            subprocess.run(["sync"], check=False)
+            return
+        except OSError as e:
+            last = e
+            time.sleep(0.5)
+    raise RuntimeError(f"UF2 copy to {UF2_MOUNT} failed (FSKit mount race?): {last}")
 
 
 # --- Firmware artifact resolution -----------------------------------------------
@@ -187,9 +299,11 @@ def resolve_uf2(rev: str, fw_version: str | None, local_uf2: str | None,
 
     Release layout (produced by release.yml): each release carries one UF2 per
     selectable build plus a manifest.json catalog whose entries describe
-    rev/variant/file/sha256/usb_product. We pick the entry matching `rev` AND
-    `variant` (default 'production'), download into the per-version cache, and
-    verify its sha256 against the manifest.
+    rev/variant/usb_product plus an optional nested `uf2: {file, sha256}` (and
+    `bin: {file, sha256}` for the ISP image, which we never look at here). We
+    pick the entry matching `rev` AND `variant` (default 'production') that
+    HAS a `uf2` build, download into the per-version cache, and verify its
+    sha256 against the manifest.
     """
     if local_uf2:
         p = Path(local_uf2)
@@ -210,8 +324,10 @@ def resolve_uf2(rev: str, fw_version: str | None, local_uf2: str | None,
         _download(assets["manifest.json"], manifest_path)
     manifest = json.loads(manifest_path.read_text())
 
-    # Entries predating the variant field are treated as 'production'.
-    artifacts = manifest.get("artifacts", [])
+    # Entries predating the variant field are treated as 'production'. A
+    # "bin"-only entry (no "uf2" key) is an ISP image for the arena
+    # controller, never something g6-flash can flash over USB — excluded.
+    artifacts = [a for a in manifest.get("artifacts", []) if a.get("uf2")]
     entry = next((a for a in artifacts
                   if a.get("rev") == rev and a.get("variant", "production") == variant), None)
     if not entry:
@@ -219,7 +335,7 @@ def resolve_uf2(rev: str, fw_version: str | None, local_uf2: str | None,
         sys.exit(f"g6-flash: release {tag} has no {rev}/{variant} build. "
                  f"Available: {', '.join(avail) or 'none'}")
 
-    fname = entry["file"]
+    fname = entry["uf2"]["file"]
     if fname not in assets:
         sys.exit(f"g6-flash: release {tag} is missing UF2 asset '{fname}'.")
     uf2 = cache / fname
@@ -227,7 +343,7 @@ def resolve_uf2(rev: str, fw_version: str | None, local_uf2: str | None,
         print(f"g6-flash: downloading {fname} from firmware release {tag} …")
         _download(assets[fname], uf2)
 
-    expect = entry.get("sha256")
+    expect = entry["uf2"].get("sha256")
     if expect:
         got = _sha256(uf2)
         if got != expect:
@@ -240,9 +356,53 @@ def resolve_uf2(rev: str, fw_version: str | None, local_uf2: str | None,
 # --- picotool wrappers ----------------------------------------------------------
 
 
+def find_picotool() -> str | None:
+    """Locate the picotool binary: PlatformIO's vendored copy first, else PATH.
+
+    picotool isn't a conda-forge package, so `pixi run` doesn't install it — but
+    PlatformIO already vendors a copy for anyone who has built with `pio`/`pixi run
+    release`/`diag`. Prefer that known-good copy over whatever a system
+    install on PATH happens to be, falling back to PATH if PlatformIO hasn't
+    fetched one.
+    """
+    for candidate in sorted(Path.home().glob(".platformio/packages/tool-picotool*/picotool")):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return shutil.which("picotool")
+
+
+def picotool_missing_message() -> str:
+    """Error text for main() when neither the PlatformIO cache nor PATH has picotool.
+
+    Steers towards pixi (this project's toolchain manager) first — `pixi run
+    release`/`diag` fetches PlatformIO's picotool as a side effect (they
+    build via `pio` under the hood), which is also how find_picotool()'s fallback
+    gets populated. OS package manager is offered as a fallback for people
+    without pixi; conda-forge is deliberately not suggested (picotool isn't a
+    conda-forge package).
+    """
+    where = "in PlatformIO's package cache (~/.platformio/packages/tool-picotool*/) or on PATH"
+    if shutil.which("pixi"):
+        primary = ("Run `pixi run release` once so PlatformIO fetches its own "
+                   "copy, then retry `pixi run flash21`/`flash31`.")
+    else:
+        primary = ("Install pixi (https://pixi.sh) — it manages this project's "
+                   "toolchain, and `pixi run release` will fetch picotool for "
+                   "you; then use `pixi run flash21`/`flash31`.")
+    return (f"g6-flash: 'picotool' not found {where}. {primary}\n"
+            "  Fallback without pixi: install picotool via your OS's package manager "
+            "(install steps differ between Windows/macOS/Linux).")
+
+
+_PICOTOOL_PATH: str | None = None
+
+
 def _picotool(*args: str) -> subprocess.CompletedProcess:
+    global _PICOTOOL_PATH
+    if _PICOTOOL_PATH is None:
+        _PICOTOOL_PATH = find_picotool() or "picotool"
     return subprocess.run(
-        ["picotool", *args], capture_output=True, text=True, check=False
+        [_PICOTOOL_PATH, *args], capture_output=True, text=True, check=False
     )
 
 
@@ -275,6 +435,10 @@ class Result:
 
 
 def flash_one(panel: Panel, rev: str, uf2: Path, execute: bool, dry_run: bool) -> Result:
+    return (_flash_one_macos if IS_MACOS else _flash_one_linux)(panel, rev, uf2, execute, dry_run)
+
+
+def _flash_one_linux(panel: Panel, rev: str, uf2: Path, execute: bool, dry_run: bool) -> Result:
     want_product = REVS[rev]["usb_product"]
 
     if dry_run:
@@ -310,15 +474,69 @@ def flash_one(panel: Panel, rev: str, uf2: Path, execute: bool, dry_run: bool) -
     return Result(panel, True, "flashed + verified", booted.product)
 
 
+def _flash_one_macos(panel: Panel, rev: str, uf2: Path, execute: bool, dry_run: bool) -> Result:
+    want_product = REVS[rev]["usb_product"]
+
+    if dry_run:
+        action = "1200-baud touch + copy" if not panel.in_bootsel else "copy (already mounted)"
+        return Result(panel, True, f"DRY-RUN: would {action} {uf2.name}")
+
+    if not execute:
+        return Result(panel, False, "--no-exec is not supported on macOS (the UF2 copy always runs the new firmware)")
+
+    # 1) Get the board into BOOTSEL (skip if it's already the mounted volume).
+    if not panel.in_bootsel:
+        try:
+            macos_touch_1200(panel.port)
+        except Exception as e:
+            return Result(panel, False, f"1200-baud BOOTSEL touch failed: {e}")
+        if not macos_wait_for_mount(REENUMERATE_TIMEOUT_S):
+            return Result(panel, False, "timed out waiting for /Volumes/RP2350 to mount")
+
+    # 2) Flash.
+    try:
+        macos_copy_uf2(uf2)
+    except RuntimeError as e:
+        return Result(panel, False, str(e))
+
+    # 3) Verify by the serial known BEFORE the touch — a blank/already-BOOTSEL
+    # board (matched via the synthetic mount entry) has none, so it can't be
+    # verified this way.
+    if panel.serial is None:
+        return Result(panel, True, "flashed (not verified — board had no known USB serial before flashing)")
+
+    booted = macos_wait_for_serial(panel.serial, REENUMERATE_TIMEOUT_S)
+    if booted is None:
+        return Result(panel, False, "flashed but panel did not re-enumerate as firmware")
+    if not (booted.product or "").startswith(want_product):
+        return Result(
+            panel, False,
+            f"WRONG REV? flashed {rev} but panel reports '{booted.product}' (expected '{want_product}*')",
+            booted.product,
+        )
+    return Result(panel, True, "flashed + verified", booted.product)
+
+
 # --- CLI ------------------------------------------------------------------------
 
 
-def select_targets(panels: list[Panel], rev: str, port: str | None, force: bool) -> list[Panel]:
+def select_targets(panels: list[Panel], rev: str, port: str | None, serial: str | None,
+                   force: bool) -> list[Panel]:
     if port:
         chosen = [p for p in panels if p.port == port]
         if not chosen:
             sys.exit(f"g6-flash: no RP2350 board on port {port}. Connected: "
                      + (", ".join(p.port for p in panels) or "none"))
+        return chosen
+
+    if serial:
+        # Only a board already running firmware exposes its serial over sysfs
+        # (a blank/BOOTSEL board doesn't) — same limitation the old deploy.sh
+        # had; use --port for a blank board instead.
+        chosen = [p for p in panels if p.serial == serial]
+        if not chosen:
+            sys.exit(f"g6-flash: no RP2350 board with serial {serial}. Connected serials: "
+                     + (", ".join(p.serial for p in panels if p.serial) or "none"))
         return chosen
 
     if not panels:
@@ -348,9 +566,9 @@ def main(argv: list[str] | None = None) -> int:
                "limit is post-flash LED-matrix inrush + USB re-enumeration, not flashing.\n"
                "For larger trays use --no-exec, then power-cycle in small groups.",
     )
-    ap.add_argument("--rev", required=True, choices=sorted(REVS),
-                    help="panel hardware revision (MANDATORY — selects the binary; "
-                         "cannot be auto-detected on a blank board)")
+    ap.add_argument("--rev", choices=sorted(REVS),
+                    help="panel hardware revision (MANDATORY unless --list; selects "
+                         "the binary; cannot be auto-detected on a blank board)")
     ap.add_argument("--variant", default="production", metavar="NAME",
                     help="firmware build variant to flash (default: production; "
                          "e.g. 'bcmtest' for the BCM self-test build)")
@@ -358,9 +576,15 @@ def main(argv: list[str] | None = None) -> int:
                     help="flash a local UF2 instead of a published release (for firmware devs)")
     ap.add_argument("--fw-version", metavar="TAG",
                     help="firmware release tag to flash (default: latest)")
-    ap.add_argument("--port", metavar="PORT",
+    target = ap.add_mutually_exclusive_group()
+    target.add_argument("--port", metavar="PORT",
                     help="flash only the board on this sysfs USB port (e.g. 3-1.4); "
                          "default: all connected panels")
+    target.add_argument("--serial", metavar="SERIAL",
+                    help="flash only the board with this USB serial number — stable "
+                         "across which port/hub it's plugged into, but only visible on "
+                         "a board already running firmware (a blank/BOOTSEL board "
+                         "exposes no serial; use --port for that case)")
     ap.add_argument("--jobs", type=int, default=4, metavar="N",
                     help="max panels flashed in parallel (default: 4)")
     ap.add_argument("--no-exec", action="store_true",
@@ -373,10 +597,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--list", action="store_true",
                     help="list connected panels and exit")
     args = ap.parse_args(argv)
+    if not args.list and not args.rev:
+        ap.error("--rev is required unless --list is given")
 
-    if not args.dry_run and not shutil.which("picotool"):
-        sys.exit("g6-flash: 'picotool' not found on PATH. Install it (conda-forge "
-                 "'picotool', or `pixi run`) and retry.")
+    if not IS_MACOS and not args.dry_run and not find_picotool():
+        sys.exit(picotool_missing_message())
 
     panels = enumerate_panels()
 
@@ -387,7 +612,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {p.label}  serial={p.serial}")
         return 0
 
-    targets = select_targets(panels, args.rev, args.port, args.force)
+    targets = select_targets(panels, args.rev, args.port, args.serial, args.force)
+    if IS_MACOS and len(targets) > 1:
+        sys.exit("g6-flash: macOS can only flash one panel per invocation (the "
+                  "BOOTSEL mass-storage mount can't disambiguate multiple boards) "
+                  "— use --serial or --port to target one.")
     uf2 = resolve_uf2(args.rev, args.fw_version, args.uf2, args.variant)
     execute = not args.no_exec
 

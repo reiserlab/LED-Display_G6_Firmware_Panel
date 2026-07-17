@@ -61,29 +61,85 @@ pixi run platformio run -d panel -e pico_v031      # build v0.3.1 (or pico_v021)
 | `pico_v031_twopiotimeouttest` | `+ TWOPIO_ROW_TIMEOUT_US=5` | Forced-fault repro for the two-PIO row-timeout recovery path (issue #21): every row burst times out, exercising the self-heal continuously. Same SPI ingest as production, but display timing is not representative — bench sessions only. Driven end-to-end by `tests/test_pr15_stuck_row_timeout.py` in [LED-Display_G6_Firmware_Arena](https://github.com/reiserlab/LED-Display_G6_Firmware_Arena). |
 | `pico_v031_twopiotimeoutdiag` | `+ TWOPIO_ROW_TIMEOUT_US=5 SPI_DIAG=1` | The forced-fault repro plus the SPI_DIAG heartbeat, which adds a live pin-state line (`PINS r=<rows> c=<cols>`, bit i = `ROW_PIN[i]`/`COL_PIN[i]` level; rows active-LOW = ON) for observing the fault at the GPIO level. |
 
+`pixi run release` builds+packages the two production envs into `dist/`:
+
+- `dist/g6-panel-<rev>.uf2` — for the `g6-flash` CLI / WebUSB flasher / GitHub Release.
+- `dist/g6-panel-<rev>.bin` — the same firmware wrapped in a 32-byte ISP footer
+  (`{magic, version, image_crc32, image_size}`) the arena controller validates before
+  reflashing a panel over SPI (see the Modular-LED-Display repo's
+  `docs/development/g6_03-controller.md` § Panel firmware update (ISP)). Copy the
+  chosen `.bin` to the controller SD card as `/firmware/panel.bin` (the controller
+  holds a single firmware at a time).
+- `dist/manifest.json` — one entry per build, each with a `uf2: {file, sha256}`
+  and/or `bin: {file, sha256}`.
+
+This is exactly what CI publishes. `pixi run diag` does the same for the
+`_bcmtest`/`_spidiag` envs above — bench/diagnostic builds staged into the same
+`dist/`, but never published by CI.
+
+`panel/tools/build_release.py` discovers both catalogs directly from
+`panel/platformio.ini`: an env belongs to `release` if it `extends = common`, or to
+`diag` if it instead `extends` another `pico_v*` env — so a new rev or variant needs
+no change to `build_release.py`/`pixi.toml` to be picked up. `python
+panel/tools/build_release.py --list` shows the current catalog.
+
+**CAUTION:** bcmtest firmware has **no SPI ingest** — a panel ISP'd with a bcmtest
+`.bin` can no longer be reflashed over SPI afterwards. Recover it via
+`flash21-github-release`/`flash31-github-release` (USB) instead of a second ISP push.
+
 ## Flash & monitor
 
-The `deploy*` / `monitor*` pixi tasks target a board by **USB serial number**
-(robust against shifting `/dev/ttyACM*` enumeration):
+Flashing goes through `panel/tools/g6_flash.py`, not PlatformIO's own upload
+target. On Linux it's `picotool`-based (see NOTE below); on macOS it instead
+does a 1200-baud BOOTSEL touch + UF2 copy to the `/Volumes/RP2350` mount
+(picotool's libusb backend can't reliably claim a CDC interface macOS's own
+kernel driver already owns), which limits macOS to **one panel per
+invocation** — `--serial`/`--port` is required there, and `flash21`/`flash31`
+(which flash every connected panel of a rev) are Linux-only. Windows is
+unsupported. `flash21`/`flash31` flash EVERY connected panel of a rev on
+Linux:
 
 ```sh
-pixi run deploy31a         # build + flash production firmware to the v0.3.1 board
-pixi run deploy31a-diag    # same, but the SPI_DIAG (serial diagnostics) build
-pixi run monitor31a        # open the USB-serial monitor for that board
+pixi run flash31                    # build the FULL release catalog, then flash all v0.3.1 panels
+pixi run flash31-github-release     # flash the latest PUBLISHED release, no local build
 ```
 
-(`*21a` variants target the v0.2.1 board.)
+(`*21`/`*21-github-release` variants target v0.2.1.) `flash21`/`flash31` build the
+full release catalog first (`pixi run release`) and flash the resulting
+`dist/g6-panel-<rev>.uf2` — the exact bytes `pixi run release`/CI would
+publish, without needing to cut a release or have network access.
+`flash21-github-release`/`flash31-github-release` skip the local build
+entirely and flash the latest published release (just `picotool` + network
+needed).
 
-> **These tasks are bound to two specific physical panels** (the serial numbers
-> are hardcoded in `pixi.toml`) and will only act on those boards. To deploy to
-> a **different** panel, find its serial with
-> `ls /dev/serial/by-id/usb-Reiser_Lab_RP2354_20x20_Display_Panel_*`
-> then either add a task in `pixi.toml` or call the script directly:
+> To flash **one specific device** instead of every connected panel,
+> build+package just that catalog entry then call `g6_flash.py` directly:
 > ```sh
-> bash panel/tools/deploy.sh <THAT_SERIAL> pico_v031
+> python panel/tools/build_release.py --only g6-panel-v0.2.1   # or -bcmtest / -spidiag / etc.
+> python panel/tools/g6_flash.py --rev v0.2.1 \
+>     --uf2 dist/g6-panel-v0.2.1.uf2 --serial <THAT_SERIAL>
 > ```
-> A panel stuck in BOOTSEL won't expose its serial — flash it manually with
-> `pixi run platformio run -d panel -e pico_v031 -t upload`.
+> Find a board's serial with `python panel/tools/g6_flash.py --list`. A panel
+> stuck in BOOTSEL is **not** a problem — `g6_flash.py` flashes it directly —
+> it just can't be targeted by `--serial` (a blank board exposes no serial),
+> so target it by `--port` instead (same `--list` output shows connected
+> ports).
+
+To open a serial console on one panel (cross-platform — matches by USB
+serial number via `pyserial`, then hands off to `pio device monitor`):
+
+```sh
+pixi run monitor -- --serial <THAT_SERIAL>
+```
+
+Find a board's serial with `python panel/tools/monitor.py --list`.
+
+> **NOTE:** on Linux, flashing needs `picotool` on PATH or in PlatformIO's package cache
+> (`~/.platformio/packages/tool-picotool*/`, already present after any `pixi run
+> release`/`diag`, since they build via `pio`). It's **not** a conda-forge package, so
+> it isn't a pinned `pixi.toml` dependency — install it yourself only if neither
+> location has it. macOS needs no extra tool beyond `pyserial` (already pulled in
+> transitively by `platformio`).
 
 ### SPI diagnostics
 
