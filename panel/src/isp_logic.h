@@ -56,7 +56,9 @@ inline bool retires_boot_indicator(uint8_t cmd_id) {
 // Row 0 = top (same Pattern orientation the predef glyphs use); '#' = lit.
 
 // Shown by boot_indicator_check() on the first boot after an ISP flash.
-inline const char *const kSmiley[PANEL_SIZE] = {
+// constexpr, not inline: works pre-C++17, and each referencing TU owning its
+// own internal-linkage copy is fine (only isp.cpp and the tests use these).
+constexpr const char *kSmiley[PANEL_SIZE] = {
     "....................",
     "....................",
     "....................",
@@ -82,7 +84,7 @@ inline const char *const kSmiley[PANEL_SIZE] = {
 // Shown when ISP_COMMIT fails to stage the image (status 8): a sad smiley,
 // the mirror of the success face, so a failed panel is as obvious at a
 // glance as a successful one.
-inline const char *const kSadSmiley[PANEL_SIZE] = {
+constexpr const char *kSadSmiley[PANEL_SIZE] = {
     "....................",
     "....................",
     "....................",
