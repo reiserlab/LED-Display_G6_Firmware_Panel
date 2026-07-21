@@ -62,6 +62,15 @@ void push_progress(uint8_t cols) {
   queue_try_add(&display_queue, &pat);  // drop-on-full is fine (drain-to-latest)
 }
 
+// Push a bar frame only when the lit-column count changed. All bar segments
+// (upload, verify, commit) share this throttle via bar_cols_shown_.
+void push_progress_if_changed(uint8_t cols) {
+  if (cols != bar_cols_shown_) {
+    bar_cols_shown_ = cols;
+    push_progress(cols);
+  }
+}
+
 // update_progress() lives below the session-state block (uses image_len_).
 
 // --- ISP session state ------------------------------------------------------
@@ -77,13 +86,9 @@ bool     resp_pending_ = false;
 bool     reboot_due_   = false;     // reboot after the COMMIT receipt clocks out
 bool     fs_ready_     = false;     // LittleFS mounted
 
-// Recompute bar fill from bytes staged so far; push only on a column change.
+// Recompute the upload-segment fill from bytes staged so far.
 void update_progress() {
-  uint8_t shown = progress_cols(image_len_ / kPageBytes);
-  if (shown != bar_cols_shown_) {
-    bar_cols_shown_ = shown;
-    push_progress(shown);
-  }
+  push_progress_if_changed(progress_cols(image_len_ / kPageBytes));
 }
 
 // CRC-8/AUTOSAR (poly 0x2F, init 0xFF, xorout 0xFF) — matches G6::crc8_autosar.
@@ -111,6 +116,26 @@ uint32_t crc32_update(uint32_t c, const uint8_t *d, size_t n) {
 
 uint32_t crc32(const uint8_t *d, size_t n) {
   return crc32_update(0xFFFFFFFFu, d, n) ^ 0xFFFFFFFFu;
+}
+
+// Shared PSRAM -> SRAM burst buffer. Per-byte XIP PSRAM reads are slow; the
+// 4096-byte memcpy bursts used here are hardware-proven clean (post-flash
+// g6-verify-panel CRC passes on images staged through this path).
+uint8_t burst_buf_[4096];
+
+// CRC-32 over a PSRAM region via SRAM bursts. Replaces the per-byte scan in
+// VERIFY_STAGED; that scan's "memcpy bursts mis-read this PSRAM at speed"
+// note is contradicted by the COMMIT path, which bursts the same buffer.
+uint32_t crc32_psram(const uint8_t *src, uint32_t len) {
+  uint32_t c = 0xFFFFFFFFu;
+  for (uint32_t off = 0; off < len;) {
+    uint32_t chunk = (len - off < sizeof(burst_buf_)) ? (len - off)
+                                                      : (uint32_t)sizeof(burst_buf_);
+    memcpy(burst_buf_, src + off, chunk);
+    c = crc32_update(c, burst_buf_, chunk);
+    off += chunk;
+  }
+  return c ^ 0xFFFFFFFFu;
 }
 
 uint32_t rd32(const uint8_t *p) {
@@ -152,13 +177,17 @@ bool stage_image_to_ota() {
   if (!ensure_fs()) return false;
   File f = LittleFS.open(kImageFile, "w");
   if (!f) { Serial.println("[isp] open firmware.bin failed"); return false; }
-  // PSRAM -> SRAM -> file in bursts (per-byte PSRAM reads are slow).
-  static uint8_t buf[4096];
+  // PSRAM -> SRAM -> file in bursts. Each f.write is a flash op that parks
+  // core 1; the bar push happens BETWEEN ops (core 1 live again), advancing
+  // the commit segment (kVerifyEntryCols..PANEL_SIZE). Keep pushes out of
+  // flash-op context.
   for (uint32_t off = 0; off < image_len_;) {
-    uint32_t chunk = (image_len_ - off < sizeof(buf)) ? (image_len_ - off) : (uint32_t)sizeof(buf);
-    memcpy(buf, stage_ + off, chunk);
-    if (f.write(buf, chunk) != chunk) { f.close(); Serial.println("[isp] fs write short"); return false; }
+    uint32_t chunk = (image_len_ - off < sizeof(burst_buf_)) ? (image_len_ - off)
+                                                             : (uint32_t)sizeof(burst_buf_);
+    memcpy(burst_buf_, stage_ + off, chunk);
+    if (f.write(burst_buf_, chunk) != chunk) { f.close(); Serial.println("[isp] fs write short"); return false; }
     off += chunk;
+    push_progress_if_changed(commit_progress_cols(off, image_len_));
   }
   f.close();
   // Register the copy: firmware.bin (whole file) -> XIP_BASE (app region).
@@ -250,8 +279,8 @@ void handle(Message &msg) {
       if (n != nonce_) { arm(2, nullptr, 0); return; }
       if (len == 0 || len > kStageMax) { arm(4, nullptr, 0); return; }
       image_len_ = len;
-      // Byte-by-byte PSRAM read (memcpy bursts mis-read this PSRAM at speed).
-      uint32_t got = crc32(stage_, len);
+      push_progress_if_changed(kVerifyEntryCols);  // verify segment of the bar
+      uint32_t got = crc32_psram(stage_, len);
       uint8_t p[4]; memcpy(p, &got, 4);
       arm(got == exp ? 0 : 5, p, 4);  // 5 = staged CRC mismatch
       return;
@@ -264,11 +293,13 @@ void handle(Message &msg) {
       if (n != nonce_) { arm(2, nullptr, 0); return; }
       if (len == 0 || len > kStageMax) { arm(4, nullptr, 0); return; }
       image_len_ = len;
-      push_progress(PANEL_SIZE);     // full bar while OTA staging writes flash
       // Stage the verified image into LittleFS + an OTA command, then reboot so the
       // core's OTA stub flashes it at clean early-boot (see stage_image_to_ota).
+      // The commit segment of the bar (kVerifyEntryCols..PANEL_SIZE) animates
+      // inside stage_image_to_ota between flash chunks.
       bool ok = stage_image_to_ota();
       if (ok) {
+        push_progress_if_changed(PANEL_SIZE);  // full bar: staged, reboot imminent
         // Marker for the freshly-flashed image: its first boot shows the smiley
         // boot indicator (boot_indicator_check); cleared again on the first
         // host display command (notify_host_command).

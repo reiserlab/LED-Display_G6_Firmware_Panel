@@ -27,31 +27,74 @@ void test_progress_monotonic_below_nominal() {
 }
 
 void test_progress_full_at_nominal() {
-  TEST_ASSERT_EQUAL_UINT8(PANEL_SIZE, progress_cols(kNominalPages));
+  TEST_ASSERT_EQUAL_UINT8(kUploadCols, progress_cols(kNominalPages));
 }
 
 void test_progress_real_images_never_wrap() {
-  // Real images are ~96-140 KB (~380..550 pages); the bar must fill
-  // near-linearly and never fall back during a normal flash.
+  // Real images are ~96-140 KB (~380..550 pages); the upload segment must
+  // fill near-linearly and never fall back during a normal flash.
   uint8_t prev = 0;
   for (uint32_t pages = 0; pages <= 550; ++pages) {
     uint8_t cols = progress_cols(pages);
     TEST_ASSERT_TRUE(cols >= prev);
     prev = cols;
   }
-  TEST_ASSERT_EQUAL_UINT8(19, progress_cols(550));  // 140.8 KB: nearly full
+  TEST_ASSERT_EQUAL_UINT8(15, progress_cols(550));  // 140.8 KB: near segment end
 }
 
-void test_progress_never_exceeds_panel_size() {
+void test_progress_never_exceeds_upload_segment() {
   for (uint32_t pages = 0; pages <= kMaxPages; ++pages) {
-    TEST_ASSERT_TRUE(progress_cols(pages) <= PANEL_SIZE);
+    TEST_ASSERT_TRUE(progress_cols(pages) <= kUploadCols);
   }
 }
 
 void test_progress_wraps_past_nominal() {
-  // Oversize images fall back to indeterminate wrap-and-refill.
-  TEST_ASSERT_EQUAL_UINT8(1, progress_cols(605));   // filled 21 -> wraps to 1
+  // Oversize images fall back to indeterminate wrap-and-refill WITHIN the
+  // upload segment (612 pages -> filled 17 -> wraps to 1).
+  TEST_ASSERT_EQUAL_UINT8(kUploadCols, progress_cols(605));  // still in segment
+  TEST_ASSERT_EQUAL_UINT8(1, progress_cols(612));
   TEST_ASSERT_EQUAL_UINT8(0, progress_cols(2 * kNominalPages));
+}
+
+// --- commit_progress_cols ----------------------------------------------------
+
+void test_segment_layout() {
+  TEST_ASSERT_TRUE(0 < kUploadCols);
+  TEST_ASSERT_TRUE(kUploadCols < kVerifyEntryCols);
+  TEST_ASSERT_TRUE(kVerifyEntryCols <= PANEL_SIZE);
+}
+
+void test_commit_progress_endpoints() {
+  TEST_ASSERT_EQUAL_UINT8(kVerifyEntryCols, commit_progress_cols(0, 130048));
+  TEST_ASSERT_EQUAL_UINT8(PANEL_SIZE, commit_progress_cols(130048, 130048));
+}
+
+void test_commit_progress_monotonic_chunks() {
+  // Sweep in the real 4096-byte staging chunks over totals that do not divide
+  // evenly by the 3-column commit segment: nondecreasing, stays in
+  // [kVerifyEntryCols, PANEL_SIZE], hits PANEL_SIZE exactly at written==total.
+  const uint32_t totals[] = {130048, 100000, 98304};
+  for (uint32_t total : totals) {
+    uint8_t prev = kVerifyEntryCols;
+    for (uint32_t written = 0; written < total;) {
+      uint32_t chunk = (total - written < 4096) ? (total - written) : 4096;
+      written += chunk;
+      uint8_t cols = commit_progress_cols(written, total);
+      TEST_ASSERT_TRUE(cols >= prev);
+      TEST_ASSERT_TRUE(cols >= kVerifyEntryCols);
+      TEST_ASSERT_TRUE(cols <= PANEL_SIZE);
+      if (written == total) TEST_ASSERT_EQUAL_UINT8(PANEL_SIZE, cols);
+      if (written < total) TEST_ASSERT_TRUE(cols < PANEL_SIZE);
+      prev = cols;
+    }
+  }
+}
+
+void test_commit_progress_degenerate() {
+  TEST_ASSERT_EQUAL_UINT8(PANEL_SIZE, commit_progress_cols(0, 0));
+  TEST_ASSERT_EQUAL_UINT8(PANEL_SIZE, commit_progress_cols(5000, 4096));  // clamps
+  // Largest legal image: no uint32 overflow in the segment math.
+  TEST_ASSERT_EQUAL_UINT8(PANEL_SIZE - 1, commit_progress_cols(kStageMax - 1, kStageMax));
 }
 
 // --- write_page_in_bounds ----------------------------------------------------
@@ -159,8 +202,12 @@ int main(int, char **) {
   RUN_TEST(test_progress_monotonic_below_nominal);
   RUN_TEST(test_progress_full_at_nominal);
   RUN_TEST(test_progress_real_images_never_wrap);
-  RUN_TEST(test_progress_never_exceeds_panel_size);
+  RUN_TEST(test_progress_never_exceeds_upload_segment);
   RUN_TEST(test_progress_wraps_past_nominal);
+  RUN_TEST(test_segment_layout);
+  RUN_TEST(test_commit_progress_endpoints);
+  RUN_TEST(test_commit_progress_monotonic_chunks);
+  RUN_TEST(test_commit_progress_degenerate);
   RUN_TEST(test_write_page_bounds);
   RUN_TEST(test_write_page_rejects_wrapping_index);
   RUN_TEST(test_retire_on_display_commands);
