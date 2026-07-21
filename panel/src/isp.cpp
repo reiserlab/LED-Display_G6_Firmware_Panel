@@ -20,52 +20,34 @@ extern queue_t display_queue;
 
 namespace {
 
+using namespace Isp;  // isp_logic.h: staging constants, indicator geometry, glyphs
+
 // --- Constants (MUST match the controller's IspController) ------------------
+// Staging sizes (kStageMax / kPageBytes / kSectorBytes) live in isp_logic.h.
 const char        kSentinel[]  = "G6PANELISPENTER";   // 15 chars + NUL = 16 bytes
 constexpr uint8_t kUnlock[4]   = {'I', 'S', 'P', '!'};
-constexpr uint32_t kStageMax   = 2u * 1024u * 1024u;  // ≤ RP2354 2 MiB app flash
-constexpr uint16_t kPageBytes  = 256;                 // flash program granule (WRITE_PAGE)
-constexpr uint32_t kSectorBytes = 4096;               // flash erase granule (reported in ENTER reply)
 const char kImageFile[] = "/firmware.bin";            // LittleFS staging file for the OTA stub
 const char kFlashedFlag[] = "/just_flashed";          // marker: OTA staged, boot indicator due
 
 // --- Visual programming indicator (LAB-44) ----------------------------------
-// While pages stream in, the panel shows a progress bar across the central 10
-// rows (rows 5..14), filling left to right. The panel does not know the image
-// total up front (only the controller does), so the bar is scaled to a nominal
-// image size; a larger image simply wraps and refills — indeterminate fallback
-// for free. Real images (~96-140 KB -> ~380..540 pages) fill near-linearly.
-constexpr uint32_t kNominalPages = 512;  // ~128 KiB nominal image
-constexpr int      kBarRowFirst  = 5;
-constexpr int      kBarRowLast   = 14;
-constexpr uint8_t  kIndicatorDuty = 128;
+// Bar geometry, nominal image size, and the smiley/sad-smiley glyphs live in
+// isp_logic.h (shared with the host-side unit tests).
 
 uint8_t bar_cols_shown_ = 0xFF;   // last pushed fill (0xFF = none this session)
 
-// 20x20 smiley, row 0 = top (same Pattern orientation the predef glyphs use).
-// Shown by boot_indicator_check() on the first boot after an ISP flash.
-const char *kSmiley[PANEL_SIZE] = {
-    "....................",
-    "....................",
-    "....................",
-    "....................",
-    ".....##......##.....",
-    ".....##......##.....",
-    "....................",
-    "....................",
-    "....................",
-    "....................",
-    "...#............#...",
-    "....#..........#....",
-    ".....#........#.....",
-    "......########......",
-    "....................",
-    "....................",
-    "....................",
-    "....................",
-    "....................",
-    "....................",
-};
+// Push a Persistent Gray_2 frame rendered from a 20-row '.'/'#' glyph
+// (isp_logic.h). Drop-on-full is fine (Display drains to latest).
+void push_glyph(const char *const rows[PANEL_SIZE]) {
+  Pattern pat;
+  pat.set_gray_level(GrayLevel::Gray_2);
+  pat.set_duty_cycle(kIndicatorDuty);
+  pat.set_mode(DisplayMode::Persistent);
+  pat.matrix().setZero();
+  for (int r = 0; r < PANEL_SIZE; ++r)
+    for (int c = 0; c < PANEL_SIZE; ++c)
+      if (rows[r][c] == '#') pat.matrix()(r, c) = 1;
+  queue_try_add(&display_queue, &pat);
+}
 
 // Push a Persistent Gray_2 progress frame with `cols` columns lit (0..20).
 void push_progress(uint8_t cols) {
@@ -97,10 +79,7 @@ bool     fs_ready_     = false;     // LittleFS mounted
 
 // Recompute bar fill from bytes staged so far; push only on a column change.
 void update_progress() {
-  uint32_t pages  = image_len_ / kPageBytes;
-  uint32_t filled = pages * PANEL_SIZE / kNominalPages;
-  uint8_t  shown  = (filled <= PANEL_SIZE) ? (uint8_t)filled
-                                           : (uint8_t)(filled % PANEL_SIZE);
+  uint8_t shown = progress_cols(image_len_ / kPageBytes);
   if (shown != bar_cols_shown_) {
     bar_cols_shown_ = shown;
     push_progress(shown);
@@ -254,8 +233,8 @@ void handle(Message &msg) {
       const uint8_t *data = pl + 7;
       uint32_t pcrc = rd32(pl + 7 + kPageBytes);
       if (crc32(data, kPageBytes) != pcrc) { arm(3, nullptr, 0); return; }
+      if (!write_page_in_bounds(idx)) { arm(4, nullptr, 0); return; }
       uint32_t off = idx * kPageBytes;
-      if (off + kPageBytes > kStageMax) { arm(4, nullptr, 0); return; }
       memcpy(stage_ + off, data, kPageBytes);
       if (off + kPageBytes > image_len_) image_len_ = off + kPageBytes;
       arm(0, nullptr, 0);
@@ -295,6 +274,11 @@ void handle(Message &msg) {
         // host display command (notify_host_command).
         File f = LittleFS.open(kFlashedFlag, "w");
         if (f) { f.write((uint8_t)'1'); f.close(); }
+      } else {
+        // Staging failed (status 8, no reboot will follow): replace the
+        // full bar with the sad smiley so the failure is as obvious at a
+        // glance as the success face.
+        push_glyph(kSadSmiley);
       }
       arm(ok ? 0 : 8, nullptr, 0);   // status 8 = OTA staging failed
       if (ok) reboot_due_ = true;    // reboot after the receipt clocks out
@@ -341,24 +325,19 @@ void boot_indicator_check() {
   if (!LittleFS.exists(kFlashedFlag)) return;
 
   // First boot after an ISP flash: show the smiley (Persistent) until the
-  // first host display command replaces it. The flag is retired on that first
+  // first host content command replaces it. The flag is retired on that first
   // command (notify_host_command), so the indicator also survives power
   // cycles until the panel is actually used.
-  Pattern pat;
-  pat.set_gray_level(GrayLevel::Gray_2);
-  pat.set_duty_cycle(kIndicatorDuty);
-  pat.set_mode(DisplayMode::Persistent);
-  pat.matrix().setZero();
-  for (int r = 0; r < PANEL_SIZE; ++r)
-    for (int c = 0; c < PANEL_SIZE; ++c)
-      if (kSmiley[r][c] == '#') pat.matrix()(r, c) = 1;
-  queue_try_add(&display_queue, &pat);
+  push_glyph(kSmiley);
 }
 
 void notify_host_command() {
-  // First valid host display command: retire the boot-indicator flag so the
-  // smiley doesn't reappear on the next power cycle. Loop context on core 0
-  // with core 1 live — safe for a LittleFS metadata write.
+  // First content command (retires_boot_indicator in isp_logic.h): retire the
+  // boot-indicator flag so the smiley doesn't reappear on the next power
+  // cycle. Loop context on core 0 with core 1 live, so the LittleFS metadata
+  // write is safe; Messenger calls this only AFTER arming the CIPO reply for
+  // the current transaction, because the one-time flash erase here (tens of
+  // ms, core 1 parked) would otherwise delay that reply.
   static bool done = false;
   if (done) return;
   done = true;

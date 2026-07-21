@@ -1,7 +1,10 @@
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
+// Arduino-free on purpose: this header is compiled host-side by the native
+// unit tests (via isp_logic.h). Keep it to stdint/stddef/STL includes.
+#include <stddef.h>
+#include <stdint.h>
 #include <unordered_map>
-#include <Arduino.h>
 
 // Protocol versions (header byte bits 0..6; bit 7 is parity)
 extern const uint8_t CMD_PROTOCOL_V1;

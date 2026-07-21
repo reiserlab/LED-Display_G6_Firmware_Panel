@@ -402,13 +402,6 @@ void Messenger::update() {
         if (cmd_umap_.count(cmd_id) > 0) {
             cmd_umap_.at(cmd_id)(msg);
             cmd_ok = true;
-            // First display-class command retires the ISP boot-indicator flag
-            // (the post-flash smiley). COMM_CHECK and ISP opcodes aren't
-            // "content", so they don't count.
-            if (cmd_id != CMD_ID_COMMS_CHECK &&
-                !(cmd_id >= CMD_ID_ISP_ENTER && cmd_id <= CMD_ID_ISP_EXIT_REBOOT)) {
-                Isp::notify_host_command();
-            }
         }
     }
 
@@ -489,6 +482,17 @@ void Messenger::update() {
                 in_version, cmd_id, chk);
             panel_spi_arm_confirmation(hdr, cmd_id, chk);
         }
+    }
+
+    // First content command retires the ISP boot-indicator flag (the
+    // post-flash smiley; see retires_boot_indicator in isp_logic.h for what
+    // counts). Placed AFTER the confirmation arming above: the one-time
+    // retire is a LittleFS flash erase (tens of ms, core 1 parked), so it
+    // must not delay this transaction's CIPO reply. It can still stall the
+    // NEXT transaction; after an ISP flash, send a throwaway display command
+    // before starting a stream.
+    if (cmd_ok && Isp::retires_boot_indicator(cmd_id)) {
+        Isp::notify_host_command();
     }
 
 #if SPI_DIAG
