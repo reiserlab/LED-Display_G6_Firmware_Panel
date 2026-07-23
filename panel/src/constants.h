@@ -28,6 +28,18 @@ extern const uint32_t SPI_SPEED;
 // External trigger pin (GP45 on both revs; forward-looking for v3 Triggered/Gated modes)
 extern const uint8_t EINT_PIN;
 
+// EINT trigger polarity for the V1 EINT modes (Triggered 0x12/0x32, Gated
+// 0x13/0x33). Default 0 = active-HIGH: Triggered advances one row per
+// LOW->HIGH edge, Gated lights the panel while EINT is HIGH, and a pull-down
+// keeps a disconnected line inactive. Build with -DEINT_ACTIVE_LOW=1
+// (pico_v0*_eintlow envs in platformio.ini) to invert everything together:
+// Triggered advances per HIGH->LOW edge, Gated lights while LOW, pull-up
+// keeps a disconnected line inactive. For trigger sources whose line is
+// asserted LOW (e.g. imaging systems with an active-low exposure output).
+#ifndef EINT_ACTIVE_LOW
+#define EINT_ACTIVE_LOW 0
+#endif
+
 // LED column and row pins (plain C arrays; matches Pico SDK conventions).
 // Pattern matrix in pattern.h still uses Eigen for matrix math.
 extern const uint8_t COL_PIN[PANEL_SIZE];
