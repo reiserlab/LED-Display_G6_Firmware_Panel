@@ -56,7 +56,8 @@ ENV_RE = re.compile(r"^pico_v(\d)(\d)(\d)(?:_(\w+))?$")
 # here still works (falls back to a title-cased version of the variant name);
 # this is NOT what decides catalog membership, so a new PlatformIO env never
 # needs an entry here to be discovered correctly.
-LABELS = {"bcmtest": "BCM self-test", "spidiag": "SPI diagnostics"}
+LABELS = {"bcmtest": "BCM self-test", "spidiag": "SPI diagnostics",
+          "eintlow": "Active-low EINT trigger"}
 
 
 def discover_catalog() -> list[dict]:
