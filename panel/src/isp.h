@@ -1,6 +1,7 @@
 #ifndef ISP_H
 #define ISP_H
 
+#include "isp_logic.h"
 #include "message.h"
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -42,6 +43,27 @@ bool response_pending();
 // due — perform the flash erase+program. Call once per update() while a reply
 // is pending, in place of the normal command read.
 void service_pending();
+
+// Visual programming indicator (LAB-44). One 20-column bar (central 10 rows)
+// spans the visible update process: WRITE_PAGE upload fills 0..kUploadCols,
+// VERIFY_STAGED lights kVerifyEntryCols, COMMIT's LittleFS staging animates
+// up to a full bar (= staged, reboot imminent). The post-reboot OTA-copy
+// window is dark; after the install the freshly-booted image shows a smiley
+// until first use; a failed ISP_COMMIT (status 8) shows a sad smiley instead.
+// Geometry, segment math, glyphs, and the retire filter live in isp_logic.h
+// (shared with the unit tests).
+//
+// boot_indicator_check(): call ONCE from the production loop() (core 0, both
+// cores in steady state — not from setup(); LittleFS ops idle the other
+// core). Shows the smiley iff the just-flashed marker file exists.
+void boot_indicator_check();
+
+// notify_host_command(): call on the first content command (see
+// retires_boot_indicator); retires the just-flashed marker so the smiley
+// stays gone after power cycles. One-shot, cheap after the first call, but
+// the first call does a LittleFS flash erase (tens of ms, parks core 1):
+// call it only AFTER the current transaction's CIPO reply is armed.
+void notify_host_command();
 
 }  // namespace Isp
 

@@ -10,16 +10,68 @@
 
 #include "protocol.h"
 #include "panel_spi_custom.h"
+#include "pattern.h"
+#include "pico/util/queue.h"
+
+// Display queue (core 0 -> core 1), owned by main.cpp. The ISP receiver pushes
+// Persistent progress/indicator Patterns into it exactly like Messenger does;
+// Display::update()'s drain-to-latest keeps it shallow.
+extern queue_t display_queue;
 
 namespace {
 
+using namespace Isp;  // isp_logic.h: staging constants, indicator geometry, glyphs
+
 // --- Constants (MUST match the controller's IspController) ------------------
+// Staging sizes (kStageMax / kPageBytes / kSectorBytes) live in isp_logic.h.
 const char        kSentinel[]  = "G6PANELISPENTER";   // 15 chars + NUL = 16 bytes
 constexpr uint8_t kUnlock[4]   = {'I', 'S', 'P', '!'};
-constexpr uint32_t kStageMax   = 2u * 1024u * 1024u;  // ≤ RP2354 2 MiB app flash
-constexpr uint16_t kPageBytes  = 256;                 // flash program granule (WRITE_PAGE)
-constexpr uint32_t kSectorBytes = 4096;               // flash erase granule (reported in ENTER reply)
 const char kImageFile[] = "/firmware.bin";            // LittleFS staging file for the OTA stub
+const char kFlashedFlag[] = "/just_flashed";          // marker: OTA staged, boot indicator due
+
+// --- Visual programming indicator (LAB-44) ----------------------------------
+// Bar geometry, nominal image size, and the smiley/sad-smiley glyphs live in
+// isp_logic.h (shared with the host-side unit tests).
+
+uint8_t bar_cols_shown_ = 0xFF;   // last pushed fill (0xFF = none this session)
+
+// Push a Persistent Gray_2 frame rendered from a 20-row '.'/'#' glyph
+// (isp_logic.h). Drop-on-full is fine (Display drains to latest).
+void push_glyph(const char *const rows[PANEL_SIZE]) {
+  Pattern pat;
+  pat.set_gray_level(GrayLevel::Gray_2);
+  pat.set_duty_cycle(kIndicatorDuty);
+  pat.set_mode(DisplayMode::Persistent);
+  pat.matrix().setZero();
+  for (int r = 0; r < PANEL_SIZE; ++r)
+    for (int c = 0; c < PANEL_SIZE; ++c)
+      if (rows[r][c] == '#') pat.matrix()(r, c) = 1;
+  queue_try_add(&display_queue, &pat);
+}
+
+// Push a Persistent Gray_2 progress frame with `cols` columns lit (0..20).
+void push_progress(uint8_t cols) {
+  Pattern pat;
+  pat.set_gray_level(GrayLevel::Gray_2);
+  pat.set_duty_cycle(kIndicatorDuty);
+  pat.set_mode(DisplayMode::Persistent);
+  pat.matrix().setZero();
+  for (int r = kBarRowFirst; r <= kBarRowLast; ++r)
+    for (int c = 0; c < cols && c < PANEL_SIZE; ++c)
+      pat.matrix()(r, c) = 1;
+  queue_try_add(&display_queue, &pat);  // drop-on-full is fine (drain-to-latest)
+}
+
+// Push a bar frame only when the lit-column count changed. All bar segments
+// (upload, verify, commit) share this throttle via bar_cols_shown_.
+void push_progress_if_changed(uint8_t cols) {
+  if (cols != bar_cols_shown_) {
+    bar_cols_shown_ = cols;
+    push_progress(cols);
+  }
+}
+
+// update_progress() lives below the session-state block (uses image_len_).
 
 // --- ISP session state ------------------------------------------------------
 uint8_t  *stage_       = nullptr;   // PSRAM staging buffer (pmalloc, lazy)
@@ -33,6 +85,11 @@ uint8_t  resp_len_     = 0;
 bool     resp_pending_ = false;
 bool     reboot_due_   = false;     // reboot after the COMMIT receipt clocks out
 bool     fs_ready_     = false;     // LittleFS mounted
+
+// Recompute the upload-segment fill from bytes staged so far.
+void update_progress() {
+  push_progress_if_changed(progress_cols(image_len_ / kPageBytes));
+}
 
 // CRC-8/AUTOSAR (poly 0x2F, init 0xFF, xorout 0xFF) — matches G6::crc8_autosar.
 uint8_t crc8(const uint8_t *d, size_t n) {
@@ -59,6 +116,26 @@ uint32_t crc32_update(uint32_t c, const uint8_t *d, size_t n) {
 
 uint32_t crc32(const uint8_t *d, size_t n) {
   return crc32_update(0xFFFFFFFFu, d, n) ^ 0xFFFFFFFFu;
+}
+
+// Shared PSRAM -> SRAM burst buffer. Per-byte XIP PSRAM reads are slow; the
+// 4096-byte memcpy bursts used here are hardware-proven clean (post-flash
+// g6-verify-panel CRC passes on images staged through this path).
+uint8_t burst_buf_[4096];
+
+// CRC-32 over a PSRAM region via SRAM bursts. Replaces the per-byte scan in
+// VERIFY_STAGED; that scan's "memcpy bursts mis-read this PSRAM at speed"
+// note is contradicted by the COMMIT path, which bursts the same buffer.
+uint32_t crc32_psram(const uint8_t *src, uint32_t len) {
+  uint32_t c = 0xFFFFFFFFu;
+  for (uint32_t off = 0; off < len;) {
+    uint32_t chunk = (len - off < sizeof(burst_buf_)) ? (len - off)
+                                                      : (uint32_t)sizeof(burst_buf_);
+    memcpy(burst_buf_, src + off, chunk);
+    c = crc32_update(c, burst_buf_, chunk);
+    off += chunk;
+  }
+  return c ^ 0xFFFFFFFFu;
 }
 
 uint32_t rd32(const uint8_t *p) {
@@ -100,13 +177,17 @@ bool stage_image_to_ota() {
   if (!ensure_fs()) return false;
   File f = LittleFS.open(kImageFile, "w");
   if (!f) { Serial.println("[isp] open firmware.bin failed"); return false; }
-  // PSRAM -> SRAM -> file in bursts (per-byte PSRAM reads are slow).
-  static uint8_t buf[4096];
+  // PSRAM -> SRAM -> file in bursts. Each f.write is a flash op that parks
+  // core 1; the bar push happens BETWEEN ops (core 1 live again), advancing
+  // the commit segment (kVerifyEntryCols..PANEL_SIZE). Keep pushes out of
+  // flash-op context.
   for (uint32_t off = 0; off < image_len_;) {
-    uint32_t chunk = (image_len_ - off < sizeof(buf)) ? (image_len_ - off) : (uint32_t)sizeof(buf);
-    memcpy(buf, stage_ + off, chunk);
-    if (f.write(buf, chunk) != chunk) { f.close(); Serial.println("[isp] fs write short"); return false; }
+    uint32_t chunk = (image_len_ - off < sizeof(burst_buf_)) ? (image_len_ - off)
+                                                             : (uint32_t)sizeof(burst_buf_);
+    memcpy(burst_buf_, stage_ + off, chunk);
+    if (f.write(burst_buf_, chunk) != chunk) { f.close(); Serial.println("[isp] fs write short"); return false; }
     off += chunk;
+    push_progress_if_changed(commit_progress_cols(off, image_len_));
   }
   f.close();
   // Register the copy: firmware.bin (whole file) -> XIP_BASE (app region).
@@ -160,6 +241,8 @@ void handle(Message &msg) {
       nonce_ = time_us_32() ^ 0xA5A5A5A5u;          // session nonce (no RNG dep)
       armed_ = true;
       image_len_ = 0;
+      bar_cols_shown_ = 0xFF;   // new session: first WRITE_PAGE pushes a fresh bar
+                                // (no push here — the ENTER reply window is tight)
       uint8_t p[17];
       memcpy(p, &nonce_, 4);
       uint32_t fs = kStageMax;  memcpy(p + 4, &fs, 4);
@@ -179,11 +262,12 @@ void handle(Message &msg) {
       const uint8_t *data = pl + 7;
       uint32_t pcrc = rd32(pl + 7 + kPageBytes);
       if (crc32(data, kPageBytes) != pcrc) { arm(3, nullptr, 0); return; }
+      if (!write_page_in_bounds(idx)) { arm(4, nullptr, 0); return; }
       uint32_t off = idx * kPageBytes;
-      if (off + kPageBytes > kStageMax) { arm(4, nullptr, 0); return; }
       memcpy(stage_ + off, data, kPageBytes);
       if (off + kPageBytes > image_len_) image_len_ = off + kPageBytes;
       arm(0, nullptr, 0);
+      update_progress();   // throttled: pushes only when the bar gains a column
       return;
     }
 
@@ -195,8 +279,8 @@ void handle(Message &msg) {
       if (n != nonce_) { arm(2, nullptr, 0); return; }
       if (len == 0 || len > kStageMax) { arm(4, nullptr, 0); return; }
       image_len_ = len;
-      // Byte-by-byte PSRAM read (memcpy bursts mis-read this PSRAM at speed).
-      uint32_t got = crc32(stage_, len);
+      push_progress_if_changed(kVerifyEntryCols);  // verify segment of the bar
+      uint32_t got = crc32_psram(stage_, len);
       uint8_t p[4]; memcpy(p, &got, 4);
       arm(got == exp ? 0 : 5, p, 4);  // 5 = staged CRC mismatch
       return;
@@ -211,7 +295,22 @@ void handle(Message &msg) {
       image_len_ = len;
       // Stage the verified image into LittleFS + an OTA command, then reboot so the
       // core's OTA stub flashes it at clean early-boot (see stage_image_to_ota).
+      // The commit segment of the bar (kVerifyEntryCols..PANEL_SIZE) animates
+      // inside stage_image_to_ota between flash chunks.
       bool ok = stage_image_to_ota();
+      if (ok) {
+        push_progress_if_changed(PANEL_SIZE);  // full bar: staged, reboot imminent
+        // Marker for the freshly-flashed image: its first boot shows the smiley
+        // boot indicator (boot_indicator_check); cleared again on the first
+        // host display command (notify_host_command).
+        File f = LittleFS.open(kFlashedFlag, "w");
+        if (f) { f.write((uint8_t)'1'); f.close(); }
+      } else {
+        // Staging failed (status 8, no reboot will follow): replace the
+        // full bar with the sad smiley so the failure is as obvious at a
+        // glance as the success face.
+        push_glyph(kSadSmiley);
+      }
       arm(ok ? 0 : 8, nullptr, 0);   // status 8 = OTA staging failed
       if (ok) reboot_due_ = true;    // reboot after the receipt clocks out
       return;
@@ -240,6 +339,40 @@ void handle(Message &msg) {
     default:
       return;
   }
+}
+
+void boot_indicator_check() {
+  // Called once from the production loop() on core 0, after both cores are in
+  // steady state — never from setup(): LittleFS flash writes/format use
+  // idleOtherCore(), which hangs before core 1 services its loop.
+  //
+  // Mount WITHOUT auto-format: on a panel that has never been ISP-flashed the
+  // FS region is unformatted and must stay untouched here (formatting is
+  // ensure_fs()'s job, lazily, in ISP context).
+  LittleFSConfig cfg(false);   // autoFormat = false
+  LittleFS.setConfig(cfg);
+  if (!LittleFS.begin()) return;
+  fs_ready_ = true;
+  if (!LittleFS.exists(kFlashedFlag)) return;
+
+  // First boot after an ISP flash: show the smiley (Persistent) until the
+  // first host content command replaces it. The flag is retired on that first
+  // command (notify_host_command), so the indicator also survives power
+  // cycles until the panel is actually used.
+  push_glyph(kSmiley);
+}
+
+void notify_host_command() {
+  // First content command (retires_boot_indicator in isp_logic.h): retire the
+  // boot-indicator flag so the smiley doesn't reappear on the next power
+  // cycle. Loop context on core 0 with core 1 live, so the LittleFS metadata
+  // write is safe; Messenger calls this only AFTER arming the CIPO reply for
+  // the current transaction, because the one-time flash erase here (tens of
+  // ms, core 1 parked) would otherwise delay that reply.
+  static bool done = false;
+  if (done) return;
+  done = true;
+  if (fs_ready_ && LittleFS.exists(kFlashedFlag)) LittleFS.remove(kFlashedFlag);
 }
 
 }  // namespace Isp

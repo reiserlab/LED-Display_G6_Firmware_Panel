@@ -344,6 +344,13 @@ void Messenger::initialize() {
     gpio_set_function(SPI_SCK_PIN, GPIO_FUNC_SPI);
     gpio_set_function(SPI_MISO_PIN, GPIO_FUNC_SPI);
     gpio_set_function(SPI_CS_PIN, GPIO_FUNC_SPI);
+    // Park the bus in its idle state while the controller is absent or still
+    // booting (its pins are high-Z until SpiManager::begin()): CS pulled HIGH
+    // so the PL022 ignores everything, SCK pulled HIGH to its MODE3 idle
+    // level. Floating lines otherwise drift across thresholds and clock junk
+    // "transactions" that raise PE02/PE03 glyphs at arena power-on.
+    gpio_pull_up(SPI_CS_PIN);
+    gpio_pull_up(SPI_SCK_PIN);
     spi_set_slave(SPI_INST, true);
     spi_set_format(SPI_INST, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
 
@@ -370,16 +377,22 @@ void Messenger::update() {
 
     panel_spi_read(msg);
 
-#if SPI_DIAG
-    // Idle: panel_spi_read() hit its diag-only CS-idle timeout and returned 0
-    // bytes (master between bursts). Service 'd'/'z' and return WITHOUT counting
-    // so idle reads never pollute the window and the commands work between
-    // bursts. (Never fires during streaming — there is always a transaction.)
+    // Zero-byte read: a CS envelope with no clocked bytes. This is not a
+    // message, so return without counting it or raising PE02/PE03. It happens
+    // legitimately all the time: the controller's CS lines each gate TWO
+    // panels (one per SPI bus) and single-panel ops like ISP clock only the
+    // target's bus, so the bus-paired panel sees ~1100 clockless CS pulses
+    // per flash; controller boot adds a brief CS-low init pulse. Real data
+    // loss is still caught controller-side (page CRC + CIPO confirmation).
+    // In SPI_DIAG builds this is also the CS-idle timeout path (master
+    // between bursts): service the one-shot 'd'/'z' serial commands here so
+    // they work between bursts without polluting the measurement window.
     if (msg.num_bytes() == 0) {
+#if SPI_DIAG
         diag_service_commands();
+#endif
         return;
     }
-#endif
     msg_count_ += 1;
 
     // Reset the COMM_CHECK byte-validation flag each message so it can't carry
@@ -482,6 +495,17 @@ void Messenger::update() {
                 in_version, cmd_id, chk);
             panel_spi_arm_confirmation(hdr, cmd_id, chk);
         }
+    }
+
+    // First content command retires the ISP boot-indicator flag (the
+    // post-flash smiley; see retires_boot_indicator in isp_logic.h for what
+    // counts). Placed AFTER the confirmation arming above: the one-time
+    // retire is a LittleFS flash erase (tens of ms, core 1 parked), so it
+    // must not delay this transaction's CIPO reply. It can still stall the
+    // NEXT transaction; after an ISP flash, send a throwaway display command
+    // before starting a stream.
+    if (cmd_ok && Isp::retires_boot_indicator(cmd_id)) {
+        Isp::notify_host_command();
     }
 
 #if SPI_DIAG

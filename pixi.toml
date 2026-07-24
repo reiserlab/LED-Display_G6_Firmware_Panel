@@ -21,6 +21,13 @@ flash31-github-release = "python panel/tools/g6_flash.py --rev v0.3.1"
 # "Flash & monitor".
 monitor = "python panel/tools/monitor.py"
 
+# Host-side unit tests (panel/test/): pure ISP logic from src/isp_logic.h.
+# No hardware needed. Uses the SYSTEM C++ compiler (any C++17 g++/clang++ on
+# PATH), deliberately NOT conda-forge's cxx-compiler: conda compilers bake the
+# environment prefix into their link inputs, which breaks when the checkout
+# path contains a space (as this repo's parent "Generation 6" does).
+test = "platformio test -d panel -e native"
+
 [dependencies]
 platformio = ">=6.1.19,<7"
 python = ">=3.9"
