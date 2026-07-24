@@ -13,14 +13,15 @@ class Display {
         void show();
 
         // V1 Gated (cmd 0x13 / 0x33): show one full 20-row scan with a
-        // per-row EINT-level check. EINT going LOW mid-scan abandons the
+        // per-row EINT-level check. EINT deasserting mid-scan abandons the
         // remaining rows; spec requires "within one bit-plane interval"
         // but we sample per-row (~50 us granularity) — see plan.
+        // (Assertion polarity: EINT_ACTIVE_LOW in constants.h.)
         void show_gated();
 
         // Drive a single row × all bit-planes of the current pat_. Used by
         // both show_gated() (in its 20-row loop) and the V1 Triggered state
-        // machine (one call per EINT rising edge). Returns false if the row
+        // machine (one call per EINT trigger edge). Returns false if the row
         // faulted (two-PIO completion-poll timeout, PANEL_REV==31 only) so
         // Triggered can retry the same row on the next edge instead of
         // silently advancing past it (next-steps-pr-15.md #1 / gh-16 #1).

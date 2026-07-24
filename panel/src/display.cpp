@@ -18,23 +18,35 @@ static inline bool eint_high() {
     return (sio_hw->gpio_hi_in & (1u << (EINT_PIN - 32))) != 0;
 }
 
+// EINT assertion level. EINT_ACTIVE_LOW (constants.h) selects the polarity;
+// everything downstream (the Triggered edge wait, the Gated level checks)
+// is written against "asserted", so both modes flip together.
+static inline bool eint_asserted() {
+#if EINT_ACTIVE_LOW
+    return !eint_high();
+#else
+    return eint_high();
+#endif
+}
 
-// Tight-poll wait for an EINT rising edge with a wall-clock timeout.
-// First waits for LOW (re-arm — handles the case where the pin is already
-// HIGH from a prior edge), then for LOW->HIGH. Returns false if the timeout
-// expires in either phase, true on rising edge detected. The 64-bit
-// `time_us_64()` read is ~50 ns; well below the 125 µs min-edge-period at
-// the spec's 8 kHz target.
-static bool wait_eint_rising(uint32_t timeout_us) {
+
+// Tight-poll wait for an EINT asserting edge (LOW->HIGH active-high,
+// HIGH->LOW active-low) with a wall-clock timeout. First waits for
+// deasserted (re-arm — handles the case where the pin is still asserted
+// from a prior edge), then for the deasserted->asserted transition. Returns
+// false if the timeout expires in either phase, true on edge detected. The
+// 64-bit `time_us_64()` read is ~50 ns; well below the 125 µs
+// min-edge-period at the spec's 8 kHz target.
+static bool wait_eint_edge(uint32_t timeout_us) {
     uint64_t deadline = time_us_64() + timeout_us;
 
-    // Phase 1: wait for LOW (re-arm). If pin is already LOW we skip.
-    while (eint_high()) {
+    // Phase 1: wait for deasserted (re-arm). If already deasserted we skip.
+    while (eint_asserted()) {
         if (time_us_64() >= deadline) return false;
         tight_loop_contents();
     }
-    // Phase 2: wait for LOW -> HIGH (rising edge).
-    while (!eint_high()) {
+    // Phase 2: wait for deasserted -> asserted (the trigger edge).
+    while (!eint_asserted()) {
         if (time_us_64() >= deadline) return false;
         tight_loop_contents();
     }
@@ -146,11 +158,16 @@ void Display::initialize() {
     gpio_set_mask64(row_pin_mask_);          // rows HIGH = OFF (normal polarity)
 
     // EINT input for V1 Triggered (0x12 / 0x32) and Gated (0x13 / 0x33).
-    // Pull-down so a disconnected EINT line stays LOW (no spurious rising
-    // edges in Triggered mode, panel dark in Gated mode).
+    // Pull toward the DEASSERTED level so a disconnected EINT line stays
+    // inactive (no spurious edges in Triggered mode, panel dark in Gated
+    // mode): pull-down for active-high, pull-up for active-low.
     gpio_init(EINT_PIN);
     gpio_set_dir(EINT_PIN, GPIO_IN);
+#if EINT_ACTIVE_LOW
+    gpio_pull_up(EINT_PIN);
+#else
     gpio_pull_down(EINT_PIN);
+#endif
 }
 
 
@@ -241,16 +258,17 @@ void Display::update() {
 
         case DisplayMode::Triggered: {
             // V1 Triggered (0x12 / 0x32): tight-poll EINT and drive one row
-            // per rising edge. 20 edges = one frame consumed → return to
-            // dark/idle. 1 s sanity timeout aborts the consumption if no
-            // edges arrive (e.g., EINT disconnected) so core 1 doesn't lock.
-            // Per the chosen tight-poll-no-yield model, a new pattern
-            // arriving mid-consumption is delayed up to one frame (or 1 s)
-            // before taking effect — controller's responsibility per spec.
+            // per asserting edge (rising active-high, falling active-low).
+            // 20 edges = one frame consumed → return to dark/idle. 1 s
+            // sanity timeout aborts the consumption if no edges arrive
+            // (e.g., EINT disconnected) so core 1 doesn't lock. Per the
+            // chosen tight-poll-no-yield model, a new pattern arriving
+            // mid-consumption is delayed up to one frame (or 1 s) before
+            // taking effect — controller's responsibility per spec.
             if (!triggered_active_) break;
             bool timed_out = false;
             while (triggered_next_row_ < PANEL_SIZE) {
-                if (!wait_eint_rising(1'000'000)) {
+                if (!wait_eint_edge(1'000'000)) {
                     timed_out = true;
                     break;
                 }
@@ -271,13 +289,13 @@ void Display::update() {
 
         case DisplayMode::Gated:
             // V1 Gated (0x13 / 0x33): EINT level is a global LED output-
-            // enable mask. While HIGH, refresh the latest queued pattern
+            // enable mask. While asserted, refresh the latest queued pattern
             // (Persistent-like behavior — the spec's "continuous refresh
             // while HIGH" matches this without requiring the controller to
-            // re-stream at 1 kHz). While LOW, do nothing — drain-to-latest
-            // above keeps the queue from backing up; new patterns are
+            // re-stream at 1 kHz). While deasserted, do nothing — drain-to-
+            // latest above keeps the queue from backing up; new patterns are
             // accepted but not visibly displayed (g6_01:218).
-            if (eint_high()) {
+            if (eint_asserted()) {
                 show_gated();
             }
             break;
@@ -357,7 +375,7 @@ bool Display::show_row(int r) {
     //   - show()'s CPU-driven loop (v0.2.1 / PANEL_REV != 31 only; the
     //     PANEL_REV==31 path calls twopio_scan_frame() directly instead)
     //   - show_gated() in the 20-row loop with per-row EINT check
-    //   - V1 Triggered: one call per EINT rising edge
+    //   - V1 Triggered: one call per EINT trigger edge
     //
     // Returns false if the row faulted (two-PIO completion-poll timeout,
     // PANEL_REV==31 only; always true on the CPU-driven v0.2.1 path outside
@@ -395,7 +413,7 @@ bool Display::show_row(int r) {
     //
     // Implications for V1 Gated (0x13 / 0x33):
     //   Mid-scan HIGH->LOW response latency ≈ one per_row_drive_time
-    //   (we check eint_high() before each row in show_gated). At full
+    //   (we check eint_asserted() before each row in show_gated). At full
     //   duty that's ~50 µs; at low duty it's a few µs. Spec wording is
     //   "within one bit-plane interval" — per-row is a documented
     //   departure (see plan).
@@ -404,7 +422,7 @@ bool Display::show_row(int r) {
 #if PANEL_REV == 31
     // v0.3.1: both axes are PIO/DMA-driven — one autonomous burst scans this
     // row through all bit-planes. Reached by Triggered (one call per EINT
-    // rising edge) and Gated (one call per row, level checked between rows).
+    // trigger edge) and Gated (one call per row, level checked between rows).
     return twopio_scan_row(r, bcm_bits);
 #else
     PIO  pio = pio_get_instance();
@@ -530,20 +548,20 @@ void Display::show_gated() {
     // below behavior-rig-observer perception. Per-plane granularity is a
     // future refinement if needed.
     //
-    // On EINT drop mid-scan: abandon remaining rows AND skip the pad — the
-    // goal is "panel dark within one row interval", so we return ASAP and
-    // let update() see EINT LOW and not call show_gated() again. LEDs
-    // are already OFF for any rows that didn't fire and rows that DID
+    // On EINT deassert mid-scan: abandon remaining rows AND skip the pad —
+    // the goal is "panel dark within one row interval", so we return ASAP
+    // and let update() see EINT deasserted and not call show_gated() again.
+    // LEDs are already OFF for any rows that didn't fire and rows that DID
     // fire have already had their row pin set HIGH=OFF by show_row's exit.
     //
     // On a row fault (two-PIO completion-poll timeout, gh-16 #1): same
     // abort-and-skip-pad shape. twopio's self-heal already drove the pins
-    // dark; the next update() re-enters show_gated() (EINT still HIGH) and
-    // rescans from row 0, so the faulted row is retried rather than
+    // dark; the next update() re-enters show_gated() (EINT still asserted)
+    // and rescans from row 0, so the faulted row is retried rather than
     // silently skipped for the rest of this pass.
     uint32_t t_start = time_us_32();
     for (int r = 0; r < PANEL_SIZE; r++) {
-        if (!eint_high()) return;
+        if (!eint_asserted()) return;
         if (!show_row(r)) return;
     }
     // Full scan completed. Pad to target period — LEDs are OFF during the
