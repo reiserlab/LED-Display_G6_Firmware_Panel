@@ -44,11 +44,14 @@ bool response_pending();
 // is pending, in place of the normal command read.
 void service_pending();
 
-// Visual programming indicator (LAB-44). During staging the ISP receiver
-// pushes a progress bar (central 10 rows) into the display queue; after an
-// OTA install the freshly-booted image shows a smiley until first use; a
-// failed ISP_COMMIT (status 8) shows a sad smiley instead. Geometry, glyphs,
-// and the retire filter live in isp_logic.h (shared with the unit tests).
+// Visual programming indicator (LAB-44). One 20-column bar (central 10 rows)
+// spans the visible update process: WRITE_PAGE upload fills 0..kUploadCols,
+// VERIFY_STAGED lights kVerifyEntryCols, COMMIT's LittleFS staging animates
+// up to a full bar (= staged, reboot imminent). The post-reboot OTA-copy
+// window is dark; after the install the freshly-booted image shows a smiley
+// until first use; a failed ISP_COMMIT (status 8) shows a sad smiley instead.
+// Geometry, segment math, glyphs, and the retire filter live in isp_logic.h
+// (shared with the unit tests).
 //
 // boot_indicator_check(): call ONCE from the production loop() (core 0, both
 // cores in steady state — not from setup(); LittleFS ops idle the other

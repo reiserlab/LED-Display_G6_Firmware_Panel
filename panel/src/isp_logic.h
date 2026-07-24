@@ -25,22 +25,40 @@ constexpr uint32_t kMaxPages = kStageMax / kPageBytes;
 inline bool write_page_in_bounds(uint32_t idx) { return idx < kMaxPages; }
 
 // --- Visual programming indicator (LAB-44) ----------------------------------
-// While pages stream in, the panel shows a progress bar across the central 10
-// rows (rows 5..14), filling left to right. The panel does not know the image
-// total up front (only the controller does), so the bar is scaled to a nominal
-// image size; a larger image simply wraps and refills, an indeterminate
-// fallback for free. Real images (~96-140 KB -> ~380..550 pages) stay below
-// nominal, so they fill near-linearly and never wrap.
-constexpr uint32_t kNominalPages  = 576;  // ~144 KiB nominal image
-constexpr int      kBarRowFirst   = 5;
-constexpr int      kBarRowLast    = 14;
-constexpr uint8_t  kIndicatorDuty = 128;
+// One 20-column bar (central 10 rows, 5..14) spans the whole visible update
+// process, weighted roughly by wall-clock: WRITE_PAGE upload fills columns
+// 0..kUploadCols, VERIFY_STAGED entry lights kVerifyEntryCols, and COMMIT's
+// LittleFS staging animates kVerifyEntryCols..PANEL_SIZE (full bar = staged,
+// reboot imminent). The post-reboot OTA-copy window is necessarily dark (the
+// OTA stub runs before the framework); the boot smiley signals completion.
+//
+// The panel does not know the image total up front (only the controller
+// does), so the upload segment is scaled to a nominal image size; a larger
+// image wraps and refills within the segment, an indeterminate fallback for
+// free. Real images (~96-140 KB -> ~380..550 pages) stay below nominal, so
+// they fill near-linearly and never wrap.
+constexpr uint32_t kNominalPages   = 576;  // ~144 KiB nominal image
+constexpr int      kBarRowFirst    = 5;
+constexpr int      kBarRowLast     = 14;
+constexpr uint8_t  kIndicatorDuty  = 128;
+constexpr uint8_t  kUploadCols     = 16;   // upload segment fills 0..16
+constexpr uint8_t  kVerifyEntryCols = 17;  // lit columns at VERIFY_STAGED entry
 
-// Bar fill (0..PANEL_SIZE columns) for `pages` staged pages.
+// Upload-segment fill (0..kUploadCols) for `pages` staged pages.
 inline uint8_t progress_cols(uint32_t pages) {
-  uint32_t filled = pages * PANEL_SIZE / kNominalPages;
-  return (filled <= PANEL_SIZE) ? (uint8_t)filled
-                                : (uint8_t)(filled % PANEL_SIZE);
+  uint32_t filled = pages * kUploadCols / kNominalPages;
+  return (filled <= kUploadCols) ? (uint8_t)filled
+                                 : (uint8_t)(filled % kUploadCols);
+}
+
+// Commit-staging fill (kVerifyEntryCols..PANEL_SIZE) for `written` of `total`
+// bytes dumped to LittleFS. total == 0 cannot reach here (COMMIT rejects
+// len == 0 upstream) but returns full as a safe degenerate. 32-bit safe:
+// written * (PANEL_SIZE - kVerifyEntryCols) <= kStageMax * 3 < 2^32.
+inline uint8_t commit_progress_cols(uint32_t written, uint32_t total) {
+  if (total == 0 || written >= total) return PANEL_SIZE;
+  return (uint8_t)(kVerifyEntryCols +
+                   written * (uint32_t)(PANEL_SIZE - kVerifyEntryCols) / total);
 }
 
 // First content command retires the ISP boot-indicator flag (the post-flash
