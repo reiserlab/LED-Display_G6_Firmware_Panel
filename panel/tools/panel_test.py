@@ -129,16 +129,22 @@ def to_firmware_cmd(words: list[str]) -> str:
     raise ValueError(f"unknown verb '{verb}' (led/all/cycle/quad/off/raw/help)")
 
 
-def send(ser: serial.Serial, cmd: str, wait_s: float = REPLY_WAIT_S) -> None:
+def send(ser: serial.Serial, cmd: str, wait_s: float = REPLY_WAIT_S, echo: bool = True) -> list[str]:
+    """Send one selftest command; return the reply lines (printed too unless echo=False)."""
     ser.reset_input_buffer()
     ser.write((cmd + "\n").encode())
     ser.flush()
+    replies: list[str] = []
     deadline = time.monotonic() + wait_s
     while time.monotonic() < deadline:
         line = ser.readline()
         if line:
-            print("  <", line.decode(errors="replace").rstrip())
+            text = line.decode(errors="replace").rstrip()
+            replies.append(text)
+            if echo:
+                print("  <", text)
             deadline = time.monotonic() + 0.1
+    return replies
 
 
 def repl(ser: serial.Serial) -> None:
