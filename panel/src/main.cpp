@@ -79,8 +79,8 @@ static void selftest_help() {
     Serial.println("  v<duty>[,bg[,fg]]  vertical bright stripe on dim Gray_16 (e.g. v2,3,15)");
     Serial.println("  p<lr>,<lc>   light single layout pixel at (lr,lc), Gray_2 duty_cycle=255");
     Serial.println("  e<slot>      raise an error glyph (e.g., e0=ERR, e1=PE01, e100=CE00)");
-    Serial.println("  T            push Triggered all-on Gray_2 pattern (V1 0x12) — drives one row per EINT rising edge on GP45");
-    Serial.println("  g            push Gated checkerboard pattern (V1 0x13) — refreshes only while GP45 is HIGH");
+    Serial.println("  T            push Triggered all-on Gray_2 pattern (V1 0x12) — one row per EINT asserting edge on GP45 (rising; falling if EINT_ACTIVE_LOW); one-shot 20 edges, or free-running if TRIGGERED_WRAP");
+    Serial.println("  g            push Gated checkerboard pattern (V1 0x13) — refreshes only while GP45 is asserted (HIGH; LOW if EINT_ACTIVE_LOW)");
     Serial.println("  t            scan-period timing benchmark across duty_cycle values");
     Serial.println("  x            toggle the 60s autocycle on/off — pause for clean T/g/p observation");
     Serial.println("  i            re-print the boot banner");

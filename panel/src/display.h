@@ -63,6 +63,9 @@ class Display {
         // timeout). Spec says no timeout is required; the 1 s bound here is
         // a defensive backstop so a Triggered cmd with no EINT source
         // doesn't hold core 1 forever.
+        // TRIGGERED_WRAP builds (constants.h): the row counter is NOT reset by
+        // a re-streamed Triggered frame, wraps 19->0, and `triggered_active_`
+        // stays true until a non-Triggered pattern arrives.
         bool    triggered_active_     = false;
         uint8_t triggered_next_row_   = 0;
 

@@ -223,8 +223,18 @@ void Display::update() {
         // realized by this re-arm. Drain-to-latest above already drops
         // intermediate patterns.
         if (pat_.mode() == DisplayMode::Triggered) {
+#if TRIGGERED_WRAP
+            // Free-running Triggered (constants.h): a re-streamed frame must
+            // NOT restart the row walk at 0 — that would light rows 0..k more
+            // often than the rest and re-impose the controller's refresh
+            // period on the light. Keep the row phase; only a transition from
+            // a non-Triggered pattern starts at row 0.
+            if (!triggered_active_) triggered_next_row_ = 0;
+            triggered_active_ = true;
+#else
             triggered_active_   = true;
             triggered_next_row_ = 0;
+#endif
         } else {
             triggered_active_   = false;
         }
@@ -266,6 +276,24 @@ void Display::update() {
             // mid-consumption is delayed up to one frame (or 1 s) before
             // taking effect — controller's responsibility per spec.
             if (!triggered_active_) break;
+#if TRIGGERED_WRAP
+            // Free-running variant (2P line-sync, constants.h): one row per
+            // EINT edge, wrapping 19 -> 0, forever. Return after EVERY row so
+            // loop1() re-enters update() and a re-streamed frame is dequeued
+            // between rows (drain-to-latest), not one whole frame late. A
+            // missing trigger source leaves the panel dark but armed. The
+            // 1 ms bound keeps the 5-deep display queue serviced while edges
+            // are absent: the controller re-streams at 300 Hz (3.3 ms) and
+            // core 0 drops on a full queue, so anything longer than ~15 ms
+            // here would leave a stale frame as the first one shown when the
+            // scanner restarts (Codex review, 2026-09-22). With edges present
+            // (63 µs apart) the bound never fires.
+            if (!wait_eint_edge(1'000)) break;
+            if (show_row(triggered_next_row_)) {
+                triggered_next_row_ = (uint8_t)((triggered_next_row_ + 1) % PANEL_SIZE);
+            }
+            break;
+#else
             bool timed_out = false;
             while (triggered_next_row_ < PANEL_SIZE) {
                 if (!wait_eint_edge(1'000'000)) {
@@ -285,6 +313,7 @@ void Display::update() {
                 have_pattern_     = false;   // dark until next command
             }
             break;
+#endif
         }
 
         case DisplayMode::Gated:

@@ -132,9 +132,13 @@ extern const GrayLevelUMap GRAY_LEVEL_UMAP;
 // V1 display modes. Per g6_01-panel-protocol.md § Display Mode Summary:
 //   0x10 / 0x30 → Oneshot    — single scan, then idle (dark)
 //   0x11 / 0x31 → Persistent — continuous refresh until next command
-//   0x12 / 0x32 → Triggered  — one row × all bit-planes per EINT rising edge;
+//   0x12 / 0x32 → Triggered  — one row × all bit-planes per EINT asserting
+//                              edge (rising; falling with EINT_ACTIVE_LOW);
 //                              20 edges = 1 frame; mid-consumption overwrite
-//                              resets the row counter
+//                              resets the row counter. The TRIGGERED_WRAP
+//                              build variant (constants.h, *_eintlow_2p envs)
+//                              instead free-runs 19->0 and keeps the row
+//                              phase across re-streamed frames.
 //   0x13 / 0x33 → Gated      — Oneshot-style pattern processing; EINT level
 //                              acts as a global LED output-enable mask
 //                              (HIGH = visible, LOW = dark)
