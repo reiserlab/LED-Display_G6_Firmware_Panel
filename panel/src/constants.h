@@ -40,6 +40,36 @@ extern const uint8_t EINT_PIN;
 #define EINT_ACTIVE_LOW 0
 #endif
 
+// BCM base ON time (µs) — the duration of the weight-1 bit-plane at
+// duty_cycle=255. A full-brightness row is 15 × base (Gray_16 planes 1+2+4+8,
+// or the single weight-15 Gray_2 plane): 45 µs at the production 3.0 µs,
+// sized for the free-running 1 kHz Persistent scan (20 rows × ~50 µs).
+//
+// For line-synchronous use with a resonant-scanning microscope the whole row
+// must fit inside the scanner's turnaround gap, which is ~18 µs on the Bergamo
+// (7.9 kHz bidirectional resonant, 63 µs line, 0.9 fill → line clock LOW for
+// ~18.4 µs; measured 2026-09). Build with -DBCM_BASE_ON_US=1.0f
+// (pico_v0*_eintlow_2p envs) so a duty=255 Gray_16 row is 15 µs + ~1 µs
+// trigger→LED latency and stays inside that gap at every duty_cycle. Ships
+// as a float literal so the bench selftest's runtime retune keeps working.
+#ifndef BCM_BASE_ON_US
+#define BCM_BASE_ON_US 3.0f
+#endif
+
+// Free-running Triggered mode (2P line-sync variant). Production V1 Triggered
+// (0x12/0x32) is one-shot: 20 EINT edges consume the frame, then the panel is
+// dark until the controller re-streams it. With the controller refreshing at
+// 300 Hz and a 15.8 kHz line clock that lights the panel for only 20 lines
+// (1.26 ms) of every 3.33 ms — a 300 Hz on/off envelope in the imaging data.
+// -DTRIGGERED_WRAP=1 makes Triggered wrap 19→0 and keep going: exactly one row
+// per EINT edge, forever, with the row counter preserved across re-streamed
+// frames (a new frame swaps the pixel data between rows without restarting at
+// row 0). The panel is then lit on every line and only during the trigger
+// window; a stalled trigger source leaves it dark.
+#ifndef TRIGGERED_WRAP
+#define TRIGGERED_WRAP 0
+#endif
+
 // LED column and row pins (plain C arrays; matches Pico SDK conventions).
 // Pattern matrix in pattern.h still uses Eigen for matrix math.
 extern const uint8_t COL_PIN[PANEL_SIZE];

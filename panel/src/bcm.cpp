@@ -16,7 +16,7 @@
 #include "protocol.h"
 
 // Globals defined in this TU and declared extern in bcm.h.
-float    bcm_base_on_us = 3.0f;       // 1 kHz refresh default; selftest can retune
+float    bcm_base_on_us = BCM_BASE_ON_US;  // 3.0 µs production (1 kHz refresh); 1.0 µs in the 2P line-sync envs (constants.h); selftest can retune
 uint32_t cycles_per_us  = 150;        // overwritten in setup1() from clock_get_hz()
 uint32_t bcm_plane_data[PANEL_SIZE][4][2];
 uint64_t row_on_mask[PANEL_SIZE];

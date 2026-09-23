@@ -57,7 +57,8 @@ ENV_RE = re.compile(r"^pico_v(\d)(\d)(\d)(?:_(\w+))?$")
 # this is NOT what decides catalog membership, so a new PlatformIO env never
 # needs an entry here to be discovered correctly.
 LABELS = {"bcmtest": "BCM self-test", "spidiag": "SPI diagnostics",
-          "eintlow": "Active-low EINT trigger"}
+          "eintlow": "Active-low EINT trigger",
+          "eintlow_2p": "Active-low EINT, 2P line-sync (1 µs BCM base, free-running Triggered)"}
 
 
 def discover_catalog() -> list[dict]:
@@ -158,6 +159,20 @@ def build_leg(entry: dict, out: Path) -> None:
     release_tag = os.environ.get("GITHUB_REF_NAME")
     if release_tag:
         cmd += ["--version", release_tag]
+    elif entry["variant"] != "production":
+        # Untagged variant build: name the variant in the footer so a panel
+        # flashed with e.g. the 2P line-sync build reports it through
+        # GET_FIRMWARE_INFO / the ISP verify sweep instead of looking like a
+        # plain <sha8>[-d] dev build of production (Codex review 2026-09-22:
+        # same opcodes, different timing contract, needs runtime identity).
+        # Footer field is 16 B incl. NUL: "<variant≤6>-<sha8>[-d]" ≤ 15 chars.
+        sha = subprocess.run(["git", "rev-parse", "--short=8", "HEAD"],
+                             capture_output=True, text=True).stdout.strip() or "unknown"
+        dirty = bool(subprocess.run(["git", "status", "--porcelain"],
+                                    capture_output=True, text=True).stdout.strip())
+        abbrev = {"eintlow_2p": "2p", "eintlow": "elow", "spidiag": "sdiag",
+                  "bcmtest": "bcmt"}.get(entry["variant"], entry["variant"][:6])
+        cmd += ["--version", f"{abbrev}-{sha}{'-d' if dirty else ''}"[:15]]
     subprocess.run(cmd, check=True)
     bin_digest = sha256(bin_dest)
     print(f"build-release: staged {bin_dest.name} ({bin_digest[:12]}…)")
