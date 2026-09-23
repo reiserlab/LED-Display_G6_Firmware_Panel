@@ -42,6 +42,19 @@ static Pattern  st_singlepixel;            // updated by 'p' command; pushed if 
 static bool     st_singlepixel_pending = false;
 static bool     autocycle_paused = false;   // 'x' toggles; halts phase pushes for bench eyeball tests
 
+// Color-channel cycle ('y' command). Each 2x2 layout quartet holds one LED of
+// each of the NUM_COLOR channels; channel = 2*(lr%2) + (lc%2) = sch_col % 4
+// (see layout.cpp). Cycle state lives here so loop() can step it while paused.
+// 'y' steps channels 0..3 in turn; 'q' keeps channels 0+1 on everywhere and
+// alternates channels 2/3 between the two diagonal 10x10 quadrant pairs.
+enum ChCycleMode { CYCLE_CHANNELS, CYCLE_QUADRANTS };
+static ChCycleMode ch_cycle_mode   = CYCLE_CHANNELS;
+static bool     ch_cycle_active    = false;
+static uint8_t  ch_cycle_duty      = 0;
+static uint32_t ch_cycle_period_ms = 1000;
+static uint32_t ch_cycle_next_ms   = 0;
+static uint8_t  ch_cycle_idx       = 0;
+
 static void selftest_banner() {
     Serial.println("");
     Serial.println("======================================================");
@@ -66,6 +79,10 @@ static void selftest_banner() {
     Serial.println("            T=push Triggered all-on Gray_2 (drive GP45 with edges),");
     Serial.println("            g=push Gated checkerboard (drive GP45 level),");
     Serial.println("            x=toggle autocycle pause, t=timing benchmark, i=banner, ?=help");
+    Serial.println("  Color channels (quartet position = sch_col%4):");
+    Serial.println("            c<ch>,<pct>=hold channel 0..3 at pct, a<pct>=all channels,");
+    Serial.println("            y<pct>[,<ms>]=cycle channels (y0 stops),");
+    Serial.println("            q<r0>,<r1>,<r2>,<r3>[,<ms>]=quadrant flip; r=s|a|b<pct> or x (q0 stops)");
     Serial.println("======================================================");
 }
 
@@ -78,6 +95,12 @@ static void selftest_help() {
     Serial.println("  s<duty>[,bg[,fg]]  horiz bright stripe on dim Gray_16 (bg/fg intensity 0..15; def 1,15)");
     Serial.println("  v<duty>[,bg[,fg]]  vertical bright stripe on dim Gray_16 (e.g. v2,3,15)");
     Serial.println("  p<lr>,<lc>   light single layout pixel at (lr,lc), Gray_2 duty_cycle=255");
+    Serial.println("  c<ch>,<pct>  hold one color channel (0..3; quartet pos 2*(lr%2)+(lc%2)) at pct 0..100");
+    Serial.println("  a<pct>       hold all channels (all-on Gray_2) at pct 0..100");
+    Serial.println("  y<pct>[,<ms>] cycle channels 0->1->2->3 at pct, <ms> per channel (def 1000); y0 stops");
+    Serial.println("  q<r0>,<r1>,<r2>,<r3>[,<ms>]  quadrant flip. Per-channel role r: s<pct>=always on,");
+    Serial.println("               a<pct>=TL+BR 10x10 quadrants, b<pct>=TR+BL (a/b swap every <ms>, def 1000), x=off.");
+    Serial.println("               Brightness per channel via Gray_16 levels. e.g. qs5,s5,a10,b10,2000   q0 stops");
     Serial.println("  e<slot>      raise an error glyph (e.g., e0=ERR, e1=PE01, e100=CE00)");
     Serial.println("  T            push Triggered all-on Gray_2 pattern (V1 0x12) — one row per EINT asserting edge on GP45 (rising; falling if EINT_ACTIVE_LOW); one-shot 20 edges, or free-running if TRIGGERED_WRAP");
     Serial.println("  g            push Gated checkerboard pattern (V1 0x13) — refreshes only while GP45 is asserted (HIGH; LOW if EINT_ACTIVE_LOW)");
@@ -103,6 +126,60 @@ static void build_allon_gray2(Pattern &pat, uint8_t duty_cycle, DisplayMode mode
     for (size_t i = 0; i < PANEL_SIZE; i++)
         for (size_t j = 0; j < PANEL_SIZE; j++)
             pat.matrix()(i, j) = 1;
+}
+
+// Light only the LEDs of one color channel (0..NUM_COLOR-1) in every quartet.
+static void build_channel_gray2(Pattern &pat, uint8_t channel, uint8_t duty_cycle) {
+    pat.set_gray_level(GrayLevel::Gray_2);
+    pat.set_duty_cycle(duty_cycle);
+    pat.set_mode(DisplayMode::Persistent);
+    for (size_t i = 0; i < PANEL_SIZE; i++)
+        for (size_t j = 0; j < PANEL_SIZE; j++)
+            pat.matrix()(i, j) = ((2 * (i % 2) + (j % 2)) == channel) ? 1 : 0;
+}
+
+static uint8_t pct_to_duty(long pct) {
+    if (pct <= 0) return 0;
+    long d = (pct * 255 + 50) / 100;
+    return (uint8_t)(d < 1 ? 1 : (d > 255 ? 255 : d));
+}
+
+// Per-channel role in the quadrant pattern ('q' command).
+enum ChRole : uint8_t { ROLE_OFF, ROLE_STATIC, ROLE_QUAD_A, ROLE_QUAD_B };
+static ChRole  quad_role[4] = { ROLE_STATIC, ROLE_STATIC, ROLE_QUAD_A, ROLE_QUAD_B };
+static uint8_t quad_pct[4]  = { 5, 5, 5, 5 };
+
+// STATIC channels light every quartet; QUAD_A channels light one diagonal
+// 10x10 quadrant pair (TL+BR when phase==0) and QUAD_B the other. Swapping
+// `phase` flips A and B. Per-channel brightness rides on Gray_16 intensity
+// (0..15, scaled to the brightest channel) under a shared duty_cycle.
+static void build_quadrant_gray16(Pattern &pat, uint8_t phase) {
+    uint8_t max_pct = 0;
+    for (int k = 0; k < 4; k++)
+        if (quad_role[k] != ROLE_OFF && quad_pct[k] > max_pct) max_pct = quad_pct[k];
+    uint8_t level[4];
+    for (int k = 0; k < 4; k++) {
+        if (quad_role[k] == ROLE_OFF || quad_pct[k] == 0 || max_pct == 0) { level[k] = 0; continue; }
+        uint32_t l = ((uint32_t)quad_pct[k] * 15 + max_pct / 2) / max_pct;
+        level[k] = (uint8_t)(l < 1 ? 1 : l);
+    }
+    pat.set_gray_level(GrayLevel::Gray_16);
+    pat.set_duty_cycle(pct_to_duty(max_pct));
+    pat.set_mode(DisplayMode::Persistent);
+    const size_t half = PANEL_SIZE / 2;
+    for (size_t i = 0; i < PANEL_SIZE; i++)
+        for (size_t j = 0; j < PANEL_SIZE; j++) {
+            uint8_t ch   = 2 * (i % 2) + (j % 2);
+            uint8_t diag = ((i >= half) != (j >= half)) ? 1 : 0;   // 0 = TL/BR, 1 = TR/BL
+            bool on;
+            switch (quad_role[ch]) {
+                case ROLE_STATIC: on = true;            break;
+                case ROLE_QUAD_A: on = (diag == phase); break;
+                case ROLE_QUAD_B: on = (diag != phase); break;
+                default:          on = false;           break;
+            }
+            pat.matrix()(i, j) = on ? level[ch] : 0;
+        }
 }
 
 static void build_checkerboard(Pattern &pat, uint8_t duty_cycle, DisplayMode mode) {
@@ -584,7 +661,169 @@ static void selftest_handle_serial() {
         Serial.println(" (Persistent); autocycle PAUSED — 'x' to resume");
         return;
     }
+    if (c == 'c') {
+        // Hold one color channel: "c<ch>,<pct>"
+        int comma = line.indexOf(',');
+        if (comma < 2) { Serial.println("ERR: usage c<ch 0..3>,<pct 0..100>"); return; }
+        long ch  = line.substring(1, comma).toInt();
+        long pct = line.substring(comma + 1).toInt();
+        if (ch < 0 || ch >= NUM_COLOR || pct < 0 || pct > 100) {
+            Serial.println("ERR: expected c<ch 0..3>,<pct 0..100>");
+            return;
+        }
+        uint8_t duty = pct_to_duty(pct);
+        build_channel_gray2(st_singlepixel, (uint8_t)ch, duty);
+        ch_cycle_active        = false;
+        autocycle_paused       = true;
+        st_singlepixel_pending = true;
+        Serial.print("hold channel "); Serial.print(ch);
+        Serial.print(" at "); Serial.print(pct); Serial.print("% (duty_cycle=");
+        Serial.print(duty); Serial.println("); autocycle PAUSED — 'x' to resume");
+        return;
+    }
+    if (c == 'a') {
+        long pct = line.substring(1).toInt();
+        if (pct < 0 || pct > 100) { Serial.println("ERR: expected a<pct 0..100>"); return; }
+        uint8_t duty = pct_to_duty(pct);
+        if (duty == 0) build_alloff(st_singlepixel, 0, DisplayMode::Persistent);
+        else           build_allon_gray2(st_singlepixel, duty, DisplayMode::Persistent);
+        ch_cycle_active        = false;
+        autocycle_paused       = true;
+        st_singlepixel_pending = true;
+        Serial.print("hold all channels at "); Serial.print(pct);
+        Serial.print("% (duty_cycle="); Serial.print(duty);
+        Serial.println("); autocycle PAUSED — 'x' to resume");
+        return;
+    }
+    if (c == 'y') {
+        // Cycle channels: "y<pct>[,<ms>]"; y0 stops and blanks.
+        String rest = line.substring(1);
+        int c1 = rest.indexOf(',');
+        long pct = rest.toInt();
+        long ms  = (c1 >= 0) ? rest.substring(c1 + 1).toInt() : 1000;
+        if (pct < 0 || pct > 100 || ms < 50 || ms > 60000) {
+            Serial.println("ERR: expected y<pct 0..100>[,<ms 50..60000>]");
+            return;
+        }
+        autocycle_paused = true;
+        if (pct == 0) {
+            ch_cycle_active = false;
+            build_alloff(st_singlepixel, 0, DisplayMode::Persistent);
+            st_singlepixel_pending = true;
+            Serial.println("cycle STOPPED (all off)");
+            return;
+        }
+        ch_cycle_mode      = CYCLE_CHANNELS;
+        ch_cycle_duty      = pct_to_duty(pct);
+        ch_cycle_period_ms = (uint32_t)ms;
+        ch_cycle_idx       = 0;
+        ch_cycle_next_ms   = millis();   // step immediately in loop()
+        ch_cycle_active    = true;
+        Serial.print("channel cycle 0->1->2->3 at "); Serial.print(pct);
+        Serial.print("% (duty_cycle="); Serial.print(ch_cycle_duty);
+        Serial.print("), "); Serial.print(ms); Serial.println(" ms each; y0 stops");
+        return;
+    }
+    if (c == 'q') {
+        // Quadrant flip: "q<r0>,<r1>,<r2>,<r3>[,<ms>]", r = s|a|b<pct> or x.
+        // "q0" stops and blanks.
+        String rest = line.substring(1);
+        rest.trim();
+        if (rest == "0") {
+            autocycle_paused = true;
+            ch_cycle_active  = false;
+            build_alloff(st_singlepixel, 0, DisplayMode::Persistent);
+            st_singlepixel_pending = true;
+            Serial.println("quadrant flip STOPPED (all off)");
+            return;
+        }
+        ChRole  roles[4];
+        uint8_t pcts[4];
+        long    ms = 1000;
+        int start = 0;
+        for (int k = 0; k < 5; k++) {
+            int comma = rest.indexOf(',', start);
+            String tok = (comma >= 0) ? rest.substring(start, comma) : rest.substring(start);
+            tok.trim();
+            if (k == 4) {
+                if (tok.length() > 0) ms = tok.toInt();
+                break;
+            }
+            if (tok.length() == 0) {
+                Serial.println("ERR: usage q<r0>,<r1>,<r2>,<r3>[,<ms>]  (r = s<pct>|a<pct>|b<pct>|x)");
+                return;
+            }
+            char r = tok.charAt(0);
+            long pct = tok.substring(1).toInt();
+            if (r == 'x') { roles[k] = ROLE_OFF; pct = 0; }
+            else if (r == 's') roles[k] = ROLE_STATIC;
+            else if (r == 'a') roles[k] = ROLE_QUAD_A;
+            else if (r == 'b') roles[k] = ROLE_QUAD_B;
+            else {
+                Serial.print("ERR: channel "); Serial.print(k);
+                Serial.println(": role must be s, a, b, or x");
+                return;
+            }
+            if (pct < 0 || pct > 100) {
+                Serial.print("ERR: channel "); Serial.print(k);
+                Serial.println(": pct must be 0..100");
+                return;
+            }
+            pcts[k] = (uint8_t)pct;
+            if (comma < 0) {
+                if (k < 3) {
+                    Serial.println("ERR: need roles for all 4 channels");
+                    return;
+                }
+                break;
+            }
+            start = comma + 1;
+        }
+        if (ms < 50 || ms > 60000) {
+            Serial.println("ERR: ms must be 50..60000");
+            return;
+        }
+        for (int k = 0; k < 4; k++) { quad_role[k] = roles[k]; quad_pct[k] = pcts[k]; }
+        autocycle_paused   = true;
+        ch_cycle_mode      = CYCLE_QUADRANTS;
+        ch_cycle_period_ms = (uint32_t)ms;
+        ch_cycle_idx       = 0;
+        ch_cycle_next_ms   = millis();
+        ch_cycle_active    = true;
+        Serial.print("quadrant flip: ");
+        for (int k = 0; k < 4; k++) {
+            Serial.print("ch"); Serial.print(k); Serial.print('=');
+            switch (quad_role[k]) {
+                case ROLE_STATIC: Serial.print("static"); break;
+                case ROLE_QUAD_A: Serial.print("quadA");  break;
+                case ROLE_QUAD_B: Serial.print("quadB");  break;
+                default:          Serial.print("off");    break;
+            }
+            if (quad_role[k] != ROLE_OFF) { Serial.print('@'); Serial.print(quad_pct[k]); Serial.print('%'); }
+            Serial.print(k < 3 ? ", " : "");
+        }
+        Serial.print("; swap every "); Serial.print(ms); Serial.println(" ms; q0 stops");
+        return;
+    }
     Serial.print("ERR: unknown cmd '"); Serial.print(c); Serial.println("' (try ?)");
+}
+
+// Advance the channel cycle when its dwell time elapses (loop() calls this).
+static void selftest_step_channel_cycle() {
+    if (!ch_cycle_active) return;
+    uint32_t now = millis();
+    if ((int32_t)(now - ch_cycle_next_ms) < 0) return;
+    if (ch_cycle_mode == CYCLE_QUADRANTS) {
+        build_quadrant_gray16(st_singlepixel, ch_cycle_idx);
+        Serial.print("  [quad] A in "); Serial.println(ch_cycle_idx ? "TR+BL" : "TL+BR");
+        ch_cycle_idx = ch_cycle_idx ? 0 : 1;
+    } else {
+        build_channel_gray2(st_singlepixel, ch_cycle_idx, ch_cycle_duty);
+        Serial.print("  [cycle] channel "); Serial.println(ch_cycle_idx);
+        ch_cycle_idx = (ch_cycle_idx + 1) % NUM_COLOR;
+    }
+    st_singlepixel_pending = true;
+    ch_cycle_next_ms = now + ch_cycle_period_ms;
 }
 #endif // STAGE2_SELFTEST
 
@@ -744,6 +983,7 @@ void loop() {
         last_logged_idx = cur_idx;
     }
 
+    selftest_step_channel_cycle();
     if (!autocycle_paused) {
         selftest_push_pattern(cur_idx, t_ms);
     } else if (st_singlepixel_pending) {
