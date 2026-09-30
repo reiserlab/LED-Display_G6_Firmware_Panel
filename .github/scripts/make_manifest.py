@@ -8,6 +8,8 @@ Each entry is a *selectable build*:
     variant      production | bcmtest | <future debug/feature build>
     label        human label shown in the flasher dropdown
     usb_product  expected USB product string (post-flash verify)
+    fingerprint  "0xXXXXXXXX" CRC-32 of the first 64 KiB of the image — the
+                 value the arena's panel inventory (0xD1) reports per panel
     uf2          optional {file, sha256} — for g6-flash / the WebUSB flasher
     bin          optional {file, sha256} — the ISP-footer image, for Arena
                  Studio's / the arena controller's over-SPI push

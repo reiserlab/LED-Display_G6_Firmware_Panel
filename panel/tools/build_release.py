@@ -43,6 +43,7 @@ import re
 import shutil
 import subprocess
 import sys
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -127,6 +128,19 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+# Fleet fingerprint: CRC-32 of the first 64 KiB of the image, as "0xXXXXXXXX".
+# It is the number the arena's panel inventory (0xD1) reports per panel when no
+# SD reference image is present, so the flasher / Arena Studio can match a
+# catalog entry against the running fleet without downloading the image.
+FINGERPRINT_PREFIX_BYTES = 64 * 1024
+
+
+def fingerprint(path: Path) -> str:
+    with open(path, "rb") as f:
+        head = f.read(FINGERPRINT_PREFIX_BYTES)
+    return f"0x{zlib.crc32(head) & 0xFFFFFFFF:08X}"
+
+
 def build_leg(entry: dict, out: Path) -> None:
     env = entry["env"]
     print(f"build-release: building {env} …")
@@ -177,6 +191,7 @@ def build_leg(entry: dict, out: Path) -> None:
     artifact = {
         "rev": entry["rev"], "variant": entry["variant"], "env": env,
         "label": entry["label"], "usb_product": entry["usb_product"],
+        "fingerprint": fingerprint(bin_dest),
         "uf2": {"file": uf2_dest.name, "sha256": uf2_digest},
         "bin": {"file": bin_dest.name, "sha256": bin_digest},
     }
