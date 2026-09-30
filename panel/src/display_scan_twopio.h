@@ -19,15 +19,12 @@
 //     only for the donor's jitter measurement; locking out core 0 would
 //     freeze production SPI ingest).
 //
-// Entire compilation unit is empty on v0.2.1 (PANEL_REV != 31).
-#if PANEL_REV == 31
 
 // Initialize the dual-PIO + dual-DMA scanner. Claims a row SM on PIO1
 // (GPIOBASE 16 → reaches GP20-39) and a col SM on PIO0 (GPIOBASE 0 → GP0-19),
 // two DMA channels, loads both programs, switches col+row pins to PIO funcsel,
 // and primes both SMs to their stall point. Returns false on resource failure
-// (caller should fail dark). Replaces pio_init_program()+pio_start() in
-// setup1() on v0.3.1.
+// (caller should fail dark). Called from setup1().
 bool twopio_init();
 
 // Recompute the per-row {pattern, delay} array from the current bcm_plane_data[]
@@ -64,5 +61,4 @@ void twopio_get_longrow(uint32_t &win_us, uint32_t &win_row,
                         uint32_t &all_us, uint32_t &all_row);
 #endif
 
-#endif // PANEL_REV == 31
 #endif // DISPLAY_SCAN_TWOPIO_H

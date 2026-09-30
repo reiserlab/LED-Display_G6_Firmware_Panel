@@ -31,6 +31,17 @@
 // serial command without reflashing. Production builds never modify it.
 extern float bcm_base_on_us;
 
+// Base ON time for Triggered patterns only (1.0 µs: a full-duty row is 15 µs,
+// short enough for a resonant scanner's turnaround gap — constants.h).
+// precompute_bcm_data() picks it from the pattern's display mode.
+extern float bcm_triggered_base_on_us;
+
+// Column-program ON overhead: 5 cycles per bit-plane (pull + mov + jmp loop
+// entry + mov + out), ~33 ns at 150 MHz regardless of the delay value.
+// precompute_bcm_data() subtracts it from each plane's delay; it sets the
+// brightness floor (very-low-duty_cycle nonlinearity).
+constexpr uint32_t PIO_ON_OVERHEAD_CYCLES = 5;
+
 // System clock cycles per microsecond. Set in setup1() from
 // clock_get_hz(clk_sys) / 1000000UL (typically 150 on RP2350).
 extern uint32_t cycles_per_us;
@@ -58,5 +69,14 @@ void precompute_scan_masks();
 // pattern-change cadence this is trivially cheap; safe to call from
 // Display::update() on each new pattern dequeue.
 void precompute_bcm_data(Pattern &pat);
+
+// Same, with an explicit base ON time (µs). Display::rebuild_scan_data() reads
+// the base once and passes it here so the base it records always matches the
+// data built (the selftest retunes bcm_base_on_us from the other core).
+void precompute_bcm_data(Pattern &pat, float base_on_us);
+
+// The BCM base ON time (µs) precompute_bcm_data() uses for `pat`: the
+// Triggered base for Triggered patterns, bcm_base_on_us otherwise.
+float bcm_base_on_us_for(Pattern &pat);
 
 #endif

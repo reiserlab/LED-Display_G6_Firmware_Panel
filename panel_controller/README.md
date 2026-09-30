@@ -7,11 +7,7 @@ bench validation in the absence of an actual arena controller.
 ## Build
 
 ```sh
-# v0.2.1 controller + peripheral pair
-pio run -d panel_controller -e pico_controller_v021
-pio run -d panel        -e pico_v021
-
-# v0.3.1 controller + peripheral pair
+# v0.3.1 controller + peripheral pair (v0.2.1 retired in panel-fw v1.3.0)
 pio run -d panel_controller -e pico_controller_v031
 pio run -d panel        -e pico_v031
 ```
@@ -19,7 +15,7 @@ pio run -d panel        -e pico_v031
 ## Wiring pre-flight
 
 **Before powering up anything**, verify the following on the panel schematics
-(`reiserlab/LED-Display_G6_Hardware_Panel` v0.2.1 / v0.3.1):
+(`reiserlab/LED-Display_G6_Hardware_Panel` v0.3.1):
 
 1. **Direction:** On both panels, the inter-panel J2 header carries MOSI/MISO/SCK
    from the panel-MCU's perspective (controller mode and peripheral mode use the same
@@ -58,17 +54,6 @@ If you need peripheral-side diagnostics (`msg_count`, `parity_ok`, `queue_drops`
 temporarily swap which panel gets the USB cable.
 
 ## Hardware pin reference
-
-### v0.2.1 — SPI0 on GP32–35
-
-| Header pin | Function | Controller GPIO | Peripheral GPIO |
-|---|---|---|---|
-| J2 pin 1 | MISO | GP35 (TX in controller mode) | GP35 (TX in peripheral mode) |
-| J2 pin 2 | MOSI | GP32 | GP32 |
-| J2 pin 3 | SCK  | GP34 | GP34 |
-| J2 pin 4 | GND  | GND  | GND  |
-| J2 pin 5 | +5V  | (USB-powered)      | **connect to controller J2 pin 5** (single-USB) |
-| J3 pin 5 | CS0  | GP33 | GP33 |
 
 ### v0.3.1 — SPI1 on GP40–43
 

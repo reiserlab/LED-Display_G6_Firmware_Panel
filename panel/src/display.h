@@ -16,13 +16,13 @@ class Display {
         // per-row EINT-level check. EINT deasserting mid-scan abandons the
         // remaining rows; spec requires "within one bit-plane interval"
         // but we sample per-row (~50 us granularity) — see plan.
-        // (Assertion polarity: EINT_ACTIVE_LOW in constants.h.)
+        // (Gated: EINT HIGH = visible; constants.h.)
         void show_gated();
 
         // Drive a single row × all bit-planes of the current pat_. Used by
         // both show_gated() (in its 20-row loop) and the V1 Triggered state
         // machine (one call per EINT trigger edge). Returns false if the row
-        // faulted (two-PIO completion-poll timeout, PANEL_REV==31 only) so
+        // faulted (two-PIO completion-poll timeout) so
         // Triggered can retry the same row on the next edge instead of
         // silently advancing past it (next-steps-pr-15.md #1 / gh-16 #1).
         bool show_row(int r);
@@ -53,18 +53,11 @@ class Display {
         Pattern saved_pattern_;
         bool    saved_have_pattern_      = false;
         bool    saved_oneshot_pending_   = false;
-        bool    saved_triggered_active_  = false;
-        uint8_t saved_triggered_next_row_= 0;
         uint64_t error_until_us_         = 0;
 
-        // V1 Triggered (cmd 0x12 / 0x32) consumption state. Reset to row 0
-        // each time a new Triggered pattern is dequeued. `triggered_active_`
-        // is true between arming and consumption of all 20 rows (or sanity
-        // timeout). Spec says no timeout is required; the 1 s bound here is
-        // a defensive backstop so a Triggered cmd with no EINT source
-        // doesn't hold core 1 forever.
-        // TRIGGERED_WRAP builds (constants.h): the row counter is NOT reset by
-        // a re-streamed Triggered frame, wraps 19->0, and `triggered_active_`
+        // V1 Triggered (cmd 0x12 / 0x32) free-running state. The row counter
+        // starts at 0 on the transition into Triggered, wraps 19->0, and is
+        // NOT reset by a re-streamed Triggered frame. `triggered_active_`
         // stays true until a non-Triggered pattern arrives.
         bool    triggered_active_     = false;
         uint8_t triggered_next_row_   = 0;
@@ -74,6 +67,12 @@ class Display {
         // should stay zero; non-zero indicates either controller is over-
         // pushing or Display::update() is starving (e.g., scan loop hung).
         uint32_t frames_skipped_ = 0;
+
+        // Rebuild bcm_plane_data + the two-PIO row tables for pat_ and record
+        // the BCM base they were built with (precomputed_base_us_), so
+        // update() can skip the rebuild for a byte-identical re-streamed frame.
+        void rebuild_scan_data();
+        float precomputed_base_us_ = -1.0f;
 
         // Begin / end the error-display window (called only from core 1).
         void enter_error_display(uint32_t slot);
@@ -109,10 +108,8 @@ void display_get_scan_stats(ScanStats &out);
 
 #if STAGE2_SELFTEST
 // Bench only: simulated per-row "free work" (µs) for the 'k' reclaimable-
-// headroom test. On v0.3.1 two-PIO this busy-wait overlaps the autonomous DMA
-// burst (hidden from scan time until it exceeds the per-row burst); on the
-// v0.2.1 CPU-row path it adds straight to scan time (core 1 must be present to
-// feed each bit-plane). 0 = disabled.
+// headroom test. The busy-wait overlaps the autonomous two-PIO DMA burst
+// (hidden from scan time until it exceeds the per-row burst). 0 = disabled.
 extern volatile uint32_t g_bench_inject_us;
 
 // Cycle-precise (DWT CYCCNT) per-frame scan-time stats for the 'j' jitter

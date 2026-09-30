@@ -48,10 +48,10 @@ Usage
     g6_flash.py --rev v0.3.1
 
     # Flash one specific board (physical USB port) with a locally built UF2:
-    g6_flash.py --rev v0.2.1 --uf2 panel/.pio/build/pico_v021/firmware.uf2 --port 3-1.4
+    g6_flash.py --rev v0.3.1 --uf2 panel/.pio/build/pico_v031/firmware.uf2 --port 3-1.4
 
     # Flash one specific bench board by USB serial number (survives port/hub moves):
-    g6_flash.py --rev v0.2.1 --uf2 panel/.pio/build/pico_v021/firmware.uf2 --serial 319A5199EE357F77
+    g6_flash.py --rev v0.3.1 --uf2 panel/.pio/build/pico_v031/firmware.uf2 --serial 5D0E63B17B147147
 
     # See what would happen without touching anything:
     g6_flash.py --rev v0.3.1 --dry-run
@@ -84,11 +84,10 @@ PID_BOOTSEL = "000f"  # RP2350 bootrom: USB mass-storage / PICOBOOT
 IS_MACOS = sys.platform == "darwin"
 UF2_MOUNT = Path("/Volumes/RP2350")  # macOS: RP2350 BOOTSEL mass-storage mount point
 
-# rev -> (PlatformIO env, USB product string prefix). Product strings are
-# "G6 Panel v0.2" / "G6 Panel v0.3" (major.minor only) — match by prefix, the
-# same way deploy.sh maps env -> product.
+# rev -> (PlatformIO env, USB product string prefix). The product string is
+# "G6 Panel v0.3" (major.minor only) — match by prefix. v0.3.1 is the only
+# supported rev (v0.2.1 retired in panel-fw v1.3.0).
 REVS = {
-    "v0.2.1": {"env": "pico_v021", "usb_product": "G6 Panel v0.2"},
     "v0.3.1": {"env": "pico_v031", "usb_product": "G6 Panel v0.3"},
 }
 
@@ -384,11 +383,11 @@ def picotool_missing_message() -> str:
     where = "in PlatformIO's package cache (~/.platformio/packages/tool-picotool*/) or on PATH"
     if shutil.which("pixi"):
         primary = ("Run `pixi run release` once so PlatformIO fetches its own "
-                   "copy, then retry `pixi run flash21`/`flash31`.")
+                   "copy, then retry `pixi run flash31`.")
     else:
         primary = ("Install pixi (https://pixi.sh) — it manages this project's "
                    "toolchain, and `pixi run release` will fetch picotool for "
-                   "you; then use `pixi run flash21`/`flash31`.")
+                   "you; then use `pixi run flash31`.")
     return (f"g6-flash: 'picotool' not found {where}. {primary}\n"
             "  Fallback without pixi: install picotool via your OS's package manager "
             "(install steps differ between Windows/macOS/Linux).")

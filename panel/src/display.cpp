@@ -1,7 +1,6 @@
 #include "constants.h"
 #include "display.h"
 #include "bcm.h"
-#include "display_pio.h"
 #include "display_scan_twopio.h"
 #include "predef_patterns.h"
 #include "protocol.h"
@@ -18,35 +17,27 @@ static inline bool eint_high() {
     return (sio_hw->gpio_hi_in & (1u << (EINT_PIN - 32))) != 0;
 }
 
-// EINT assertion level. EINT_ACTIVE_LOW (constants.h) selects the polarity;
-// everything downstream (the Triggered edge wait, the Gated level checks)
-// is written against "asserted", so both modes flip together.
-static inline bool eint_asserted() {
-#if EINT_ACTIVE_LOW
-    return !eint_high();
-#else
-    return eint_high();
-#endif
-}
+// Triggered fires on the FALLING edge; Gated is lit while EINT is HIGH
+// (constants.h). Only Triggered changed polarity in v1.3.0 — the 2P line clock
+// is LOW during the turnaround gap, the window the display may light.
 
 
-// Tight-poll wait for an EINT asserting edge (LOW->HIGH active-high,
-// HIGH->LOW active-low) with a wall-clock timeout. First waits for
-// deasserted (re-arm — handles the case where the pin is still asserted
-// from a prior edge), then for the deasserted->asserted transition. Returns
+// Tight-poll wait for an EINT falling (HIGH->LOW) edge with a wall-clock
+// timeout. First waits for HIGH (re-arm — handles the case where the pin is
+// still LOW from a prior edge), then for the HIGH->LOW transition. Returns
 // false if the timeout expires in either phase, true on edge detected. The
 // 64-bit `time_us_64()` read is ~50 ns; well below the 125 µs
 // min-edge-period at the spec's 8 kHz target.
 static bool wait_eint_edge(uint32_t timeout_us) {
     uint64_t deadline = time_us_64() + timeout_us;
 
-    // Phase 1: wait for deasserted (re-arm). If already deasserted we skip.
-    while (eint_asserted()) {
+    // Phase 1: wait for HIGH (re-arm). If already HIGH we skip.
+    while (!eint_high()) {
         if (time_us_64() >= deadline) return false;
         tight_loop_contents();
     }
-    // Phase 2: wait for deasserted -> asserted (the trigger edge).
-    while (!eint_asserted()) {
+    // Phase 2: wait for HIGH -> LOW (the trigger edge).
+    while (eint_high()) {
         if (time_us_64() >= deadline) return false;
         tight_loop_contents();
     }
@@ -126,6 +117,15 @@ void display_get_scan_stats(ScanStats &out) {
 }
 
 
+// True if `a` and `b` would produce identical scan data: same pixels, gray
+// level, duty cycle and display mode (mode selects the BCM base). ~400 byte
+// compares — far cheaper than precompute_bcm_data().
+static bool same_scan_content(Pattern &a, Pattern &b) {
+    return a.mode() == b.mode() && a.gray_level() == b.gray_level()
+        && a.duty_cycle() == b.duty_cycle() && a.matrix() == b.matrix();
+}
+
+
 // Cross-core flag — defined here, declared in display.h.
 volatile bool Display::error_display_active = false;
 
@@ -137,8 +137,8 @@ Display::Display(queue_t &display_queue, queue_t &error_request_queue)
 
 void Display::initialize() {
     // S2.2: Initialize col and row pins as plain SIO outputs in their dark
-    // resting state. PIO will take over the col pins later via pio_start()
-    // (in setup1, AFTER this function returns). The ordering matters — see
+    // resting state. PIO will take over the col + row pins later via
+    // twopio_init() (in setup1, AFTER this function returns). The ordering matters — see
     // the comment block in main.cpp::setup1().
     col_pin_mask_ = 0;
     for (size_t i=0; i<PANEL_SIZE; i++) {
@@ -158,16 +158,12 @@ void Display::initialize() {
     gpio_set_mask64(row_pin_mask_);          // rows HIGH = OFF (normal polarity)
 
     // EINT input for V1 Triggered (0x12 / 0x32) and Gated (0x13 / 0x33).
-    // Pull toward the DEASSERTED level so a disconnected EINT line stays
-    // inactive (no spurious edges in Triggered mode, panel dark in Gated
-    // mode): pull-down for active-high, pull-up for active-low.
+    // Pull-down, so a disconnected EINT is dark in BOTH modes: a line held
+    // LOW has no falling edge (Triggered never fires) and is below the Gated
+    // HIGH = visible level.
     gpio_init(EINT_PIN);
     gpio_set_dir(EINT_PIN, GPIO_IN);
-#if EINT_ACTIVE_LOW
-    gpio_pull_up(EINT_PIN);
-#else
     gpio_pull_down(EINT_PIN);
-#endif
 }
 
 
@@ -215,33 +211,30 @@ void Display::update() {
         pops++;
     }
     if (pops > 0) {
+        // The controller re-streams the same frame continuously (300 Hz on the
+        // 2P rigs). Rebuilding scan data costs ~100-150 µs — one or two line
+        // clock edges in Triggered — so skip it when nothing would change:
+        // the scan data already describes pat_ (every pat_ assignment is
+        // followed by a rebuild) and was built with the base `latest` needs
+        // (the selftest 'b' retune re-pushes the same pattern to rebuild).
+        bool unchanged = have_pattern_ && same_scan_content(latest, pat_)
+                      && bcm_base_on_us_for(latest) == precomputed_base_us_;
         pat_ = latest;
         have_pattern_ = true;
         oneshot_pending_ = (pat_.mode() == DisplayMode::Oneshot);
-        // V1 Triggered: arm a fresh consumption window; the spec's "new
-        // pattern resets the internal row counter to 0" (g6_01:205) is
-        // realized by this re-arm. Drain-to-latest above already drops
+        // V1 Triggered free-runs (constants.h): a re-streamed frame must NOT
+        // restart the row walk at 0 — that would light rows 0..k more often
+        // than the rest and re-impose the controller's refresh period on the
+        // light. Keep the row phase; only a transition from a non-Triggered
+        // pattern starts at row 0. Drain-to-latest above already drops
         // intermediate patterns.
         if (pat_.mode() == DisplayMode::Triggered) {
-#if TRIGGERED_WRAP
-            // Free-running Triggered (constants.h): a re-streamed frame must
-            // NOT restart the row walk at 0 — that would light rows 0..k more
-            // often than the rest and re-impose the controller's refresh
-            // period on the light. Keep the row phase; only a transition from
-            // a non-Triggered pattern starts at row 0.
             if (!triggered_active_) triggered_next_row_ = 0;
             triggered_active_ = true;
-#else
-            triggered_active_   = true;
-            triggered_next_row_ = 0;
-#endif
         } else {
             triggered_active_   = false;
         }
-        precompute_bcm_data(pat_);
-#if PANEL_REV == 31
-        twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
-#endif
+        if (!unchanged) rebuild_scan_data();
         if (pops > 1) frames_skipped_ += (pops - 1);
     }
 
@@ -267,64 +260,39 @@ void Display::update() {
             break;
 
         case DisplayMode::Triggered: {
-            // V1 Triggered (0x12 / 0x32): tight-poll EINT and drive one row
-            // per asserting edge (rising active-high, falling active-low).
-            // 20 edges = one frame consumed → return to dark/idle. 1 s
-            // sanity timeout aborts the consumption if no edges arrive
-            // (e.g., EINT disconnected) so core 1 doesn't lock. Per the
-            // chosen tight-poll-no-yield model, a new pattern arriving
-            // mid-consumption is delayed up to one frame (or 1 s) before
-            // taking effect — controller's responsibility per spec.
+            // V1 Triggered (0x12 / 0x32 / 0x52 / 0x62), free-running: one
+            // row per EINT asserting (HIGH->LOW) edge, wrapping 19 -> 0,
+            // forever, until a non-Triggered pattern arrives. Return after
+            // EVERY row so loop1() re-enters update() and a re-streamed frame
+            // is dequeued between rows (drain-to-latest), not one whole frame
+            // late. A missing trigger source leaves the panel dark but armed.
+            // The 1 ms bound keeps the 5-deep display queue serviced while
+            // edges are absent: the controller re-streams at 300 Hz (3.3 ms)
+            // and core 0 drops on a full queue, so anything longer than
+            // ~15 ms here would leave a stale frame as the first one shown
+            // when the scanner restarts (Codex review, 2026-09-22). With
+            // edges present (63 µs apart on the Bergamo) it never fires.
             if (!triggered_active_) break;
-#if TRIGGERED_WRAP
-            // Free-running variant (2P line-sync, constants.h): one row per
-            // EINT edge, wrapping 19 -> 0, forever. Return after EVERY row so
-            // loop1() re-enters update() and a re-streamed frame is dequeued
-            // between rows (drain-to-latest), not one whole frame late. A
-            // missing trigger source leaves the panel dark but armed. The
-            // 1 ms bound keeps the 5-deep display queue serviced while edges
-            // are absent: the controller re-streams at 300 Hz (3.3 ms) and
-            // core 0 drops on a full queue, so anything longer than ~15 ms
-            // here would leave a stale frame as the first one shown when the
-            // scanner restarts (Codex review, 2026-09-22). With edges present
-            // (63 µs apart) the bound never fires.
             if (!wait_eint_edge(1'000)) break;
+            // next-steps-pr-15.md #1 / gh-16 #1: a faulted row must not
+            // advance the row counter — that would consume the EINT edge
+            // without the row ever displaying. Retry the SAME row on the
+            // next edge instead.
             if (show_row(triggered_next_row_)) {
                 triggered_next_row_ = (uint8_t)((triggered_next_row_ + 1) % PANEL_SIZE);
             }
             break;
-#else
-            bool timed_out = false;
-            while (triggered_next_row_ < PANEL_SIZE) {
-                if (!wait_eint_edge(1'000'000)) {
-                    timed_out = true;
-                    break;
-                }
-                // next-steps-pr-15.md #1 / gh-16 #1: a faulted row must not
-                // silently advance the row counter — that would consume the
-                // EINT edge without the row ever actually displaying. Retry
-                // the SAME row on the next edge instead.
-                if (show_row(triggered_next_row_)) {
-                    triggered_next_row_++;
-                }
-            }
-            if (timed_out || triggered_next_row_ >= PANEL_SIZE) {
-                triggered_active_ = false;
-                have_pattern_     = false;   // dark until next command
-            }
-            break;
-#endif
         }
 
         case DisplayMode::Gated:
             // V1 Gated (0x13 / 0x33): EINT level is a global LED output-
-            // enable mask. While asserted, refresh the latest queued pattern
+            // enable mask. While HIGH, refresh the latest queued pattern
             // (Persistent-like behavior — the spec's "continuous refresh
             // while HIGH" matches this without requiring the controller to
-            // re-stream at 1 kHz). While deasserted, do nothing — drain-to-
+            // re-stream at 1 kHz). While LOW, do nothing — drain-to-
             // latest above keeps the queue from backing up; new patterns are
             // accepted but not visibly displayed (g6_01:218).
-            if (eint_asserted()) {
+            if (eint_high()) {
                 show_gated();
             }
             break;
@@ -334,14 +302,12 @@ void Display::update() {
 
 void Display::enter_error_display(uint32_t slot) {
     // Snapshot the live display state. Pattern is copyable (only an Eigen
-    // 20x20 + scalars), so by-value is fine. Includes Triggered consumption
-    // state so a Triggered pattern interrupted by an error resumes from the
-    // saved row counter when the error window closes.
+    // 20x20 + scalars), so by-value is fine. A Triggered pattern does not
+    // resume after the window (exit_error_display), so its row state isn't
+    // saved.
     saved_pattern_            = pat_;
     saved_have_pattern_       = have_pattern_;
     saved_oneshot_pending_    = oneshot_pending_;
-    saved_triggered_active_   = triggered_active_;
-    saved_triggered_next_row_ = triggered_next_row_;
 
     // Load the error glyph. Fall back to slot 0 ("ERR") if the requested
     // slot is unprogrammed, and fall back to the compiled-in glyph if even
@@ -357,13 +323,18 @@ void Display::enter_error_display(uint32_t slot) {
     pat_                  = error_pattern_;
     have_pattern_         = true;
     oneshot_pending_      = false;     // Persistent within the error window
-    triggered_active_     = false;     // suspended; will be restored on exit
-    precompute_bcm_data(pat_);
-#if PANEL_REV == 31
-    twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
-#endif
+    triggered_active_     = false;     // Triggered does not resume (exit_error_display)
+    rebuild_scan_data();
     error_until_us_       = time_us_64() + ERROR_DISPLAY_DURATION_US;
     error_display_active  = true;      // single-writer; volatile suffices
+}
+
+
+void Display::rebuild_scan_data() {
+    float base_on_us = bcm_base_on_us_for(pat_);   // read once (see bcm.h)
+    precompute_bcm_data(pat_, base_on_us);
+    twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
+    precomputed_base_us_ = base_on_us;
 }
 
 
@@ -372,6 +343,19 @@ void Display::exit_error_display() {
 
     if (!saved_have_pattern_) {
         // Nothing was displayed before the error — go dark.
+        have_pattern_     = false;
+        oneshot_pending_  = false;
+        triggered_active_ = false;
+        return;
+    }
+
+    if (saved_pattern_.mode() == DisplayMode::Triggered) {
+        // Free-running Triggered does not resume after an error: go dark
+        // until the next command. Messenger ignores every command during the
+        // window (spec receive-and-ignore), so a STOP / ALL_OFF sent then is
+        // lost — resuming would light the stale frame on every line edge
+        // forever. A controller mid-trial re-streams within ~3 ms, which
+        // restarts Triggered at row 0.
         have_pattern_     = false;
         oneshot_pending_  = false;
         triggered_active_ = false;
@@ -390,25 +374,19 @@ void Display::exit_error_display() {
     pat_                = saved_pattern_;
     have_pattern_       = true;
     oneshot_pending_    = saved_oneshot_pending_;
-    triggered_active_   = saved_triggered_active_;
-    triggered_next_row_ = saved_triggered_next_row_;
-    precompute_bcm_data(pat_);
-#if PANEL_REV == 31
-    twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
-#endif
+    triggered_active_   = false;       // only non-Triggered patterns get here
+    rebuild_scan_data();
 }
 
 
 bool Display::show_row(int r) {
     // Drive one row × all bit-planes for the current pat_. Called by:
-    //   - show()'s CPU-driven loop (v0.2.1 / PANEL_REV != 31 only; the
-    //     PANEL_REV==31 path calls twopio_scan_frame() directly instead)
     //   - show_gated() in the 20-row loop with per-row EINT check
     //   - V1 Triggered: one call per EINT trigger edge
     //
-    // Returns false if the row faulted (two-PIO completion-poll timeout,
-    // PANEL_REV==31 only; always true on the CPU-driven v0.2.1 path outside
-    // STAGE2_SELFTEST, which has no bounded failure mode in production).
+    // (show() scans whole frames through twopio_scan_frame() instead.)
+    //
+    // Returns false if the row faulted (two-PIO completion-poll timeout).
     //
     //   N = 1 for Gray_2 (single weight-15 plane)
     //   N = 4 for Gray_16 (weights {1, 2, 4, 8})
@@ -419,7 +397,8 @@ bool Display::show_row(int r) {
     //
     // ---- Timing (duty_cycle controls LED-on window) ----------------------
     // Per-row drive time = the window the row pin is LOW (LEDs enabled).
-    // Scales with duty_cycle and gray_level:
+    // Scales with duty_cycle and gray_level, at the 3 µs base (Persistent,
+    // Oneshot, Gated):
     //   Gray_2  duty=255: ~45 µs   duty=128: ~23 µs   duty=85: ~15 µs
     //   Gray_2  duty=64:  ~11 µs   duty=1:    ~1-3 µs (PIO floor)
     //   Gray_16 duty=255: ~50 µs   duty=128: ~25 µs   duty=85: ~17 µs
@@ -427,69 +406,27 @@ bool Display::show_row(int r) {
     // After the planes complete, show_row sets the row HIGH (=OFF) on exit;
     // the panel is naturally dark between rows.
     //
-    // Implications for V1 Triggered (0x12 / 0x32):
-    //   Canonical use case is sub-frame sync where each row's LED flash
-    //   should occupy a SMALL fraction (~10-15%) of its EINT trigger
-    //   interval, so the LED-on window stays clear of adjacent triggers'
-    //   downstream sampling. At 8 kHz EINT (125 µs interval):
-    //       duty_cycle ~64-85 → ~10-15% LED-on (per-row), 400 fps total
-    //   At duty_cycle=255 the per-row drive (~45-50 µs) is ~40% of the
-    //   125 µs interval — a HARD UPPER BOUND, not a target. Operating
-    //   near it leaves no dead time between rows.
+    // Implications for V1 Triggered (0x12 / 0x32), 1 µs base (constants.h):
+    //   Canonical use case is resonant-scanner line sync: one row per line
+    //   clock edge, and the whole row must finish inside the turnaround gap
+    //   (~18 µs on the Bergamo). Gray_16 duty=255 ≈ 15 µs + ~1 µs
+    //   trigger→LED latency; duty=191 ≈ 11 µs, the rig-recommended ceiling.
     //   See g6_01-panel-protocol.md § Timing considerations for the full
-    //   table and worked examples. **Bench-test the intended (duty_cycle,
-    //   EINT freq, gray level) combination before production.**
+    //   table. **Bench-test the intended (duty_cycle, EINT freq, gray level)
+    //   combination before production.**
     //
     // Implications for V1 Gated (0x13 / 0x33):
     //   Mid-scan HIGH->LOW response latency ≈ one per_row_drive_time
-    //   (we check eint_asserted() before each row in show_gated). At full
+    //   (we check eint_high() before each row in show_gated). At full
     //   duty that's ~50 µs; at low duty it's a few µs. Spec wording is
     //   "within one bit-plane interval" — per-row is a documented
     //   departure (see plan).
     // ----------------------------------------------------------------------
     uint8_t bcm_bits = (pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4;
-#if PANEL_REV == 31
     // v0.3.1: both axes are PIO/DMA-driven — one autonomous burst scans this
     // row through all bit-planes. Reached by Triggered (one call per EINT
     // trigger edge) and Gated (one call per row, level checked between rows).
     return twopio_scan_row(r, bcm_bits);
-#else
-    PIO  pio = pio_get_instance();
-    uint sm  = pio_get_sm();
-
-#if STAGE2_SELFTEST
-    // Bench: CPU-row path has no autonomous burst to overlap, so injected
-    // "free work" lands here and adds directly to this row's scan time.
-    if (g_bench_inject_us) busy_wait_us(g_bench_inject_us);
-#endif
-    gpio_clr_mask64(row_on_mask[r]);   // row LOW = ON (normal polarity)
-    for (int b = 0; b < bcm_bits; b++) {
-        pio_sm_put_blocking(pio, sm, bcm_plane_data[r][b][0]);
-        pio_sm_put_blocking(pio, sm, bcm_plane_data[r][b][1]);
-        #if STAGE2_SELFTEST
-            // Selftest-only diagnostic: 100 µs timeout + fail-dark on
-            // missed PIO IRQ. Without this, a PIO mis-config silently
-            // hangs core 1 with one row LOW (LEDs stuck on indefinitely).
-            uint32_t t0 = time_us_32();
-            while (!pio_interrupt_get(pio, 0)) {
-                if ((uint32_t)(time_us_32() - t0) > 100) {
-                    gpio_set_mask64(row_on_mask[r]);   // row OFF
-                    Serial.print("PIO IRQ TIMEOUT row=");
-                    Serial.print(r);
-                    Serial.print(" plane=");
-                    Serial.println(b);
-                    pio_sm_set_enabled(pio, sm, false);
-                    return false;
-                }
-            }
-        #else
-            while (!pio_interrupt_get(pio, 0)) { tight_loop_contents(); }
-        #endif
-        pio_interrupt_clear(pio, 0);
-    }
-    gpio_set_mask64(row_on_mask[r]);   // row HIGH = OFF
-    return true;
-#endif
 }
 
 
@@ -511,9 +448,7 @@ void Display::show() {
     uint32_t c_start = m33_hw->dwt_cyccnt;   // cycle-precise scan-time start
 #endif
 
-#if PANEL_REV == 31
-    // v0.3.1: one DMA-fed two-PIO burst per row; core 1 only arms + polls,
-    // freed from the per-bit-plane FIFO push + IRQ busy-wait of the v0.2.1 path.
+    // One DMA-fed two-PIO burst per row; core 1 only arms + polls.
     int bcm_bits = (pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4;
     if (!twopio_scan_frame(bcm_bits)) {
         // Faulted frame: twopio already aborted DMA + re-primed the SMs. Skip
@@ -522,11 +457,6 @@ void Display::show() {
         // surfaces the fault count in the SPI_DIAG dump.
         return;
     }
-#else
-    for (int r = 0; r < PANEL_SIZE; r++) {
-        show_row(r);
-    }
-#endif
 
     uint32_t t_scan_end = time_us_32();
     uint32_t scan_us    = t_scan_end - t_start;
@@ -590,7 +520,7 @@ void Display::show_gated() {
     // silently skipped for the rest of this pass.
     uint32_t t_start = time_us_32();
     for (int r = 0; r < PANEL_SIZE; r++) {
-        if (!eint_asserted()) return;
+        if (!eint_high()) return;
         if (!show_row(r)) return;
     }
     // Full scan completed. Pad to target period — LEDs are OFF during the

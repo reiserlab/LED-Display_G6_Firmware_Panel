@@ -147,7 +147,7 @@ For tests that sweep a parameter (e.g., Triggered at 100 Hz / 1 kHz / 8 kHz / 22
 |---|---|---|---|---|
 | 1 | **Firmware boots, predef blob valid** | Power-on + USB | Serial | `predef: ok, 200 slots (1994 B)` printed within 2 s of boot |
 | 2 | **EINT polarity — rising-edge fires** | AD3 single rising pulse (1 ms width, 3.3 V) after `T` | Saleae D0 (EINT) + D1 (row[0]) + A0 (photodiode) | Row LOW + photodiode rise both follow EINT rising edge within 5 µs; no LED transition correlated with EINT falling edge |
-| 3 | **Triggered consumption: 20 edges = 1 frame** | AD3 burst of 20 rising edges at 1 kHz after `T` | Saleae all rows + photodiode | Each edge produces one row drive (row LOW window); 20 edges total; panel dark after edge 21 |
+| 3 | **Triggered free-running** (panel-fw v1.3.0; was "20 edges = 1 frame") | AD3 burst of 45 falling edges at 1 kHz after `T` | Saleae all rows + photodiode | Each falling edge produces one row drive (row LOW window); rows wrap 19→0; still lit after edge 21; dark between bursts |
 | 4 | **Triggered at 8 kHz with operational duty_cycle** | Modify `T` cmd to push duty=85 (or panel_controller 0x12 at duty=85), AD3 burst at 8 kHz | Saleae | Per-row LED-on window 12-18 µs (~10-15% of 125 µs); no edges missed across 100 bursts |
 | 5 | **All glyphs render** | `e 0; e 1; e 2; e 3; e 4; e 5; e 100; e 50` via serial, one per ~1.5 s | Camera frame or photodiode array | Eyeball check (manual) — automated version requires multi-pixel sensor |
 
@@ -157,7 +157,7 @@ For tests that sweep a parameter (e.g., Triggered at 100 Hz / 1 kHz / 8 kHz / 22
 |---|---|---|---|---|
 | 6 | **Gated brightness matches Persistent** | `g` (Gated checkerboard duty=192) with AD3 holding GP45 HIGH for 100 ms, then compare to Persistent at same pattern | A0 photodiode integration | Mean photodiode value during HIGH window within 10% of Persistent reference |
 | 7 | **Gated drop latency** | AD3 generates HIGH (100 ms) → LOW step | Saleae D0 (EINT) + A0 (photodiode) | Photodiode drops below threshold within 60 µs of EINT falling (50 µs row-drive worst case + 10 µs margin) |
-| 8 | **Error display interrupts + restores Triggered** | `T` + AD3 firing edges at 100 Hz; midway through (e.g., after 10 edges), inject `e 2` | Saleae all rows + photodiode | PE02 glyph visible for ~1 s; then Triggered resumes from edge 11 |
+| 8 | **Error display interrupts Triggered, then dark** (panel-fw v1.3.0; was "restores Triggered") | `T` + AD3 firing falling edges at 100 Hz; midway through, inject `e 2` | Saleae all rows + photodiode | PE02 glyph visible for the error window; then dark despite edges until the next display command; a new `T` restarts at row 0 |
 | 9 | **Error rate-limit (1 per 5 s)** | panel_controller injects 10 bad-parity messages over 1 s | Saleae photodiode + serial heartbeat | Exactly 1 error glyph displayed; serial heartbeat shows `err_displayed:1, err_suppressed:9` |
 | 10 | **CIPO unchanged during error window** | panel_controller sends valid 0x10, captures CIPO; injects error; sends another 0x10 during error window, captures CIPO | Saleae SPI channels | Second CIPO capture identical to first |
 

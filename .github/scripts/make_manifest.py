@@ -4,10 +4,12 @@ into the firmware manifest.json — the build catalog consumed by g6-flash CLI,
 the WebUSB browser flasher, and Arena Studio's over-SPI panel-firmware push.
 
 Each entry is a *selectable build*:
-    rev          hardware revision (v0.2.1 / v0.3.1)
+    rev          hardware revision (v0.3.1)
     variant      production | bcmtest | <future debug/feature build>
     label        human label shown in the flasher dropdown
     usb_product  expected USB product string (post-flash verify)
+    fingerprint  "0xXXXXXXXX" CRC-32 of the first 64 KiB of the image — the
+                 value the arena's panel inventory (0xD1) reports per panel
     uf2          optional {file, sha256} — for g6-flash / the WebUSB flasher
     bin          optional {file, sha256} — the ISP-footer image, for Arena
                  Studio's / the arena controller's over-SPI push
@@ -28,7 +30,7 @@ import sys
 
 # Sort/default policy: production builds first, newest hardware rev first, so
 # the default (first production v0.3.1 build) lands at the top of the dropdown.
-REV_ORDER = {"v0.3.1": 0, "v0.2.1": 1}
+REV_ORDER = {"v0.3.1": 0}
 DEFAULT_REV = "v0.3.1"
 
 

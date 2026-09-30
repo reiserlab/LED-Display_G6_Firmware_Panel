@@ -25,9 +25,9 @@ extern const uint8_t CMD_PROTOCOL;   // default for outgoing V1; inbound version
 //                            PSRAM display with explicit duty_cycle × 4 modes)
 //   V3 (header 0x03/0x83) = everything else — diagnostics, predefined patterns,
 //                           future feature classes
-// V1 firmware (this build) implements COMM_CHECK + Oneshot + Persistent only.
-// V1 Triggered/Gated specced and prototyped in G6_Panels_Test_Firmware but not
-// in this firmware yet.
+// V1 firmware (this build) implements COMM_CHECK and all four display modes.
+// Triggered is free-running on the EINT falling edge (panel-fw v1.3.0; see the
+// DisplayMode comment below and constants.h).
 enum CommandId: uint8_t {
     // ---- V1 (header byte 0x01 / 0x81) — live SPI display ----
     CMD_ID_COMMS_CHECK              = 0x01,
@@ -35,7 +35,7 @@ enum CommandId: uint8_t {
     // 2-Level (1bpp) display, 50 B pixel + 1 B duty_cycle payload
     CMD_ID_DISPLAY_GRAY_2             = 0x10,   // Oneshot     — single scan, then idle
     CMD_ID_DISPLAY_GRAY_2_PERSIST     = 0x11,   // Persistent  — continuous refresh until next cmd
-    CMD_ID_DISPLAY_GRAY_2_TRIGGERED   = 0x12,   // Triggered   — one row per EINT edge, 20 edges = 1 frame
+    CMD_ID_DISPLAY_GRAY_2_TRIGGERED   = 0x12,   // Triggered   — one row per EINT falling edge, free-running
     CMD_ID_DISPLAY_GRAY_2_GATED       = 0x13,   // Gated       — EINT level masks LED output
 
     // 16-Level (4bpp) display, 200 B pixel + 1 B duty_cycle payload
@@ -132,13 +132,10 @@ extern const GrayLevelUMap GRAY_LEVEL_UMAP;
 // V1 display modes. Per g6_01-panel-protocol.md § Display Mode Summary:
 //   0x10 / 0x30 → Oneshot    — single scan, then idle (dark)
 //   0x11 / 0x31 → Persistent — continuous refresh until next command
-//   0x12 / 0x32 → Triggered  — one row × all bit-planes per EINT asserting
-//                              edge (rising; falling with EINT_ACTIVE_LOW);
-//                              20 edges = 1 frame; mid-consumption overwrite
-//                              resets the row counter. The TRIGGERED_WRAP
-//                              build variant (constants.h, *_eintlow_2p envs)
-//                              instead free-runs 19->0 and keeps the row
-//                              phase across re-streamed frames.
+//   0x12 / 0x32 → Triggered  — one row × all bit-planes per EINT falling
+//                              edge; free-runs 19->0 and
+//                              keeps the row phase across re-streamed frames;
+//                              1 µs BCM base (constants.h)
 //   0x13 / 0x33 → Gated      — Oneshot-style pattern processing; EINT level
 //                              acts as a global LED output-enable mask
 //                              (HIGH = visible, LOW = dark)

@@ -131,7 +131,7 @@ def main() -> None:
 
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--env", help="PlatformIO env name, e.g. pico_v021")
+    ap.add_argument("--env", help="PlatformIO env name, e.g. pico_v031")
     ap.add_argument("--build-dir", default=str(repo / "panel" / ".pio" / "build"),
                     help="PlatformIO build root (default: panel/.pio/build)")
     ap.add_argument("--bin", help="use this raw .bin directly (skips UF2 reconstruction)")

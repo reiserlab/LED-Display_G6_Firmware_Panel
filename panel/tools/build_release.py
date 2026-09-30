@@ -43,6 +43,7 @@ import re
 import shutil
 import subprocess
 import sys
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,9 +57,7 @@ ENV_RE = re.compile(r"^pico_v(\d)(\d)(\d)(?:_(\w+))?$")
 # here still works (falls back to a title-cased version of the variant name);
 # this is NOT what decides catalog membership, so a new PlatformIO env never
 # needs an entry here to be discovered correctly.
-LABELS = {"bcmtest": "BCM self-test", "spidiag": "SPI diagnostics",
-          "eintlow": "Active-low EINT trigger",
-          "eintlow_2p": "Active-low EINT, 2P line-sync (1 µs BCM base, free-running Triggered)"}
+LABELS = {"bcmtest": "BCM self-test", "spidiag": "SPI diagnostics"}
 
 
 def discover_catalog() -> list[dict]:
@@ -109,7 +108,7 @@ def discover_catalog() -> list[dict]:
                   "neither 'common' nor another pico_v* env", file=sys.stderr)
             continue
 
-        usb_product = f"G6 Panel {rev[:-2]}"  # "v0.2.1" -> "G6 Panel v0.2"
+        usb_product = f"G6 Panel {rev[:-2]}"  # "v0.3.1" -> "G6 Panel v0.3"
         label_text = LABELS.get(variant, variant.replace("_", " ").title())
         slug_variant = variant.replace("_", "-")
         slug = f"g6-panel-{rev}" if variant == "production" else f"g6-panel-{rev}-{slug_variant}"
@@ -127,6 +126,19 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 16), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+# Fleet fingerprint: CRC-32 of the first 64 KiB of the image, as "0xXXXXXXXX".
+# It is the number the arena's panel inventory (0xD1) reports per panel when no
+# SD reference image is present, so the flasher / Arena Studio can match a
+# catalog entry against the running fleet without downloading the image.
+FINGERPRINT_PREFIX_BYTES = 64 * 1024
+
+
+def fingerprint(path: Path) -> str:
+    with open(path, "rb") as f:
+        head = f.read(FINGERPRINT_PREFIX_BYTES)
+    return f"0x{zlib.crc32(head) & 0xFFFFFFFF:08X}"
 
 
 def build_leg(entry: dict, out: Path) -> None:
@@ -161,7 +173,7 @@ def build_leg(entry: dict, out: Path) -> None:
         cmd += ["--version", release_tag]
     elif entry["variant"] != "production":
         # Untagged variant build: name the variant in the footer so a panel
-        # flashed with e.g. the 2P line-sync build reports it through
+        # flashed with e.g. the spidiag build reports it through
         # GET_FIRMWARE_INFO / the ISP verify sweep instead of looking like a
         # plain <sha8>[-d] dev build of production (Codex review 2026-09-22:
         # same opcodes, different timing contract, needs runtime identity).
@@ -170,8 +182,7 @@ def build_leg(entry: dict, out: Path) -> None:
                              capture_output=True, text=True).stdout.strip() or "unknown"
         dirty = bool(subprocess.run(["git", "status", "--porcelain"],
                                     capture_output=True, text=True).stdout.strip())
-        abbrev = {"eintlow_2p": "2p", "eintlow": "elow", "spidiag": "sdiag",
-                  "bcmtest": "bcmt"}.get(entry["variant"], entry["variant"][:6])
+        abbrev = {"spidiag": "sdiag", "bcmtest": "bcmt"}.get(entry["variant"], entry["variant"][:6])
         cmd += ["--version", f"{abbrev}-{sha}{'-d' if dirty else ''}"[:15]]
     subprocess.run(cmd, check=True)
     bin_digest = sha256(bin_dest)
@@ -180,6 +191,7 @@ def build_leg(entry: dict, out: Path) -> None:
     artifact = {
         "rev": entry["rev"], "variant": entry["variant"], "env": env,
         "label": entry["label"], "usb_product": entry["usb_product"],
+        "fingerprint": fingerprint(bin_dest),
         "uf2": {"file": uf2_dest.name, "sha256": uf2_digest},
         "bin": {"file": bin_dest.name, "sha256": bin_digest},
     }
@@ -223,6 +235,15 @@ def main(argv: list[str] | None = None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     for entry in entries:
         build_leg(entry, out)
+
+    # Drop staged metadata for envs no longer in the catalog (e.g. a dist/ left
+    # over from a release that still built v0.2.1), so a local manifest never
+    # advertises retired firmware. Their .uf2/.bin files are left alone.
+    known = {e["slug"] for e in catalog}
+    for stale in out.rglob("artifact-*.json"):   # make_manifest reads recursively
+        if stale.stem[len("artifact-"):] not in known:
+            print(f"build-release: dropping stale {stale.name} (not in the catalog)")
+            stale.unlink()
 
     # manifest.json is assembled from whatever artifact-*.json is present in
     # `out` — so `--only`, or running `release` and `diag` into the

@@ -12,11 +12,11 @@
 #include "bcm.h"
 #include "constants.h"
 #include "layout.h"
-#include "display_pio.h"
 #include "protocol.h"
 
 // Globals defined in this TU and declared extern in bcm.h.
-float    bcm_base_on_us = BCM_BASE_ON_US;  // 3.0 µs production (1 kHz refresh); 1.0 µs in the 2P line-sync envs (constants.h); selftest can retune
+float    bcm_base_on_us           = BCM_BASE_ON_US;            // 3.0 µs (1 kHz refresh); selftest can retune
+float    bcm_triggered_base_on_us = BCM_TRIGGERED_BASE_ON_US;  // 1.0 µs, Triggered only (constants.h)
 uint32_t cycles_per_us  = 150;        // overwritten in setup1() from clock_get_hz()
 uint32_t bcm_plane_data[PANEL_SIZE][4][2];
 uint64_t row_on_mask[PANEL_SIZE];
@@ -29,7 +29,20 @@ void precompute_scan_masks() {
 }
 
 
+float bcm_base_on_us_for(Pattern &pat) {
+    // Triggered rows must fit the line-sync gap, so that mode has its own,
+    // shorter base (constants.h). Every other mode uses the 1 kHz base.
+    return (pat.mode() == DisplayMode::Triggered) ? bcm_triggered_base_on_us
+                                                  : bcm_base_on_us;
+}
+
+
 void precompute_bcm_data(Pattern &pat) {
+    precompute_bcm_data(pat, bcm_base_on_us_for(pat));
+}
+
+
+void precompute_bcm_data(Pattern &pat, float base_on_us) {
     uint8_t duty_cycle = pat.duty_cycle();
     uint8_t bcm_bits;
     uint32_t bcm_weights[4] = {0, 0, 0, 0};
@@ -59,7 +72,7 @@ void precompute_bcm_data(Pattern &pat) {
         return;
     }
 
-    uint32_t base_cycles = (uint32_t)(bcm_base_on_us * (float)cycles_per_us);
+    uint32_t base_cycles = (uint32_t)(base_on_us * (float)cycles_per_us);
 
     // Per-plane PIO delay = (base_cycles * weight * duty_cycle / 255) - 5
     // overhead. At very low duty_cycle the scaled time may fall below the
