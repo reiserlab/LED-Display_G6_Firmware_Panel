@@ -53,8 +53,6 @@ class Display {
         Pattern saved_pattern_;
         bool    saved_have_pattern_      = false;
         bool    saved_oneshot_pending_   = false;
-        bool    saved_triggered_active_  = false;
-        uint8_t saved_triggered_next_row_= 0;
         uint64_t error_until_us_         = 0;
 
         // V1 Triggered (cmd 0x12 / 0x32) free-running state. The row counter

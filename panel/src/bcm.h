@@ -70,6 +70,11 @@ void precompute_scan_masks();
 // Display::update() on each new pattern dequeue.
 void precompute_bcm_data(Pattern &pat);
 
+// Same, with an explicit base ON time (µs). Display::rebuild_scan_data() reads
+// the base once and passes it here so the base it records always matches the
+// data built (the selftest retunes bcm_base_on_us from the other core).
+void precompute_bcm_data(Pattern &pat, float base_on_us);
+
 // The BCM base ON time (µs) precompute_bcm_data() uses for `pat`: the
 // Triggered base for Triggered patterns, bcm_base_on_us otherwise.
 float bcm_base_on_us_for(Pattern &pat);

@@ -302,14 +302,12 @@ void Display::update() {
 
 void Display::enter_error_display(uint32_t slot) {
     // Snapshot the live display state. Pattern is copyable (only an Eigen
-    // 20x20 + scalars), so by-value is fine. Includes Triggered consumption
-    // state so a Triggered pattern interrupted by an error resumes from the
-    // saved row counter when the error window closes.
+    // 20x20 + scalars), so by-value is fine. A Triggered pattern does not
+    // resume after the window (exit_error_display), so its row state isn't
+    // saved.
     saved_pattern_            = pat_;
     saved_have_pattern_       = have_pattern_;
     saved_oneshot_pending_    = oneshot_pending_;
-    saved_triggered_active_   = triggered_active_;
-    saved_triggered_next_row_ = triggered_next_row_;
 
     // Load the error glyph. Fall back to slot 0 ("ERR") if the requested
     // slot is unprogrammed, and fall back to the compiled-in glyph if even
@@ -325,7 +323,7 @@ void Display::enter_error_display(uint32_t slot) {
     pat_                  = error_pattern_;
     have_pattern_         = true;
     oneshot_pending_      = false;     // Persistent within the error window
-    triggered_active_     = false;     // suspended; will be restored on exit
+    triggered_active_     = false;     // Triggered does not resume (exit_error_display)
     rebuild_scan_data();
     error_until_us_       = time_us_64() + ERROR_DISPLAY_DURATION_US;
     error_display_active  = true;      // single-writer; volatile suffices
@@ -333,9 +331,10 @@ void Display::enter_error_display(uint32_t slot) {
 
 
 void Display::rebuild_scan_data() {
-    precompute_bcm_data(pat_);
+    float base_on_us = bcm_base_on_us_for(pat_);   // read once (see bcm.h)
+    precompute_bcm_data(pat_, base_on_us);
     twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
-    precomputed_base_us_ = bcm_base_on_us_for(pat_);
+    precomputed_base_us_ = base_on_us;
 }
 
 
@@ -375,8 +374,7 @@ void Display::exit_error_display() {
     pat_                = saved_pattern_;
     have_pattern_       = true;
     oneshot_pending_    = saved_oneshot_pending_;
-    triggered_active_   = saved_triggered_active_;
-    triggered_next_row_ = saved_triggered_next_row_;
+    triggered_active_   = false;       // only non-Triggered patterns get here
     rebuild_scan_data();
 }
 

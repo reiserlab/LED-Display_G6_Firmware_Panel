@@ -225,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
     # over from a release that still built v0.2.1), so a local manifest never
     # advertises retired firmware. Their .uf2/.bin files are left alone.
     known = {e["slug"] for e in catalog}
-    for stale in out.glob("artifact-*.json"):
+    for stale in out.rglob("artifact-*.json"):   # make_manifest reads recursively
         if stale.stem[len("artifact-"):] not in known:
             print(f"build-release: dropping stale {stale.name} (not in the catalog)")
             stale.unlink()

@@ -38,6 +38,11 @@ float bcm_base_on_us_for(Pattern &pat) {
 
 
 void precompute_bcm_data(Pattern &pat) {
+    precompute_bcm_data(pat, bcm_base_on_us_for(pat));
+}
+
+
+void precompute_bcm_data(Pattern &pat, float base_on_us) {
     uint8_t duty_cycle = pat.duty_cycle();
     uint8_t bcm_bits;
     uint32_t bcm_weights[4] = {0, 0, 0, 0};
@@ -67,7 +72,7 @@ void precompute_bcm_data(Pattern &pat) {
         return;
     }
 
-    uint32_t base_cycles = (uint32_t)(bcm_base_on_us_for(pat) * (float)cycles_per_us);
+    uint32_t base_cycles = (uint32_t)(base_on_us * (float)cycles_per_us);
 
     // Per-plane PIO delay = (base_cycles * weight * duty_cycle / 255) - 5
     // overhead. At very low duty_cycle the scaled time may fall below the
