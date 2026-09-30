@@ -16,7 +16,7 @@ class Display {
         // per-row EINT-level check. EINT deasserting mid-scan abandons the
         // remaining rows; spec requires "within one bit-plane interval"
         // but we sample per-row (~50 us granularity) — see plan.
-        // (Assertion polarity: EINT_ACTIVE_LOW in constants.h.)
+        // (Gated: EINT HIGH = visible; constants.h.)
         void show_gated();
 
         // Drive a single row × all bit-planes of the current pat_. Used by
@@ -57,14 +57,9 @@ class Display {
         uint8_t saved_triggered_next_row_= 0;
         uint64_t error_until_us_         = 0;
 
-        // V1 Triggered (cmd 0x12 / 0x32) consumption state. Reset to row 0
-        // each time a new Triggered pattern is dequeued. `triggered_active_`
-        // is true between arming and consumption of all 20 rows (or sanity
-        // timeout). Spec says no timeout is required; the 1 s bound here is
-        // a defensive backstop so a Triggered cmd with no EINT source
-        // doesn't hold core 1 forever.
-        // TRIGGERED_WRAP builds (constants.h): the row counter is NOT reset by
-        // a re-streamed Triggered frame, wraps 19->0, and `triggered_active_`
+        // V1 Triggered (cmd 0x12 / 0x32) free-running state. The row counter
+        // starts at 0 on the transition into Triggered, wraps 19->0, and is
+        // NOT reset by a re-streamed Triggered frame. `triggered_active_`
         // stays true until a non-Triggered pattern arrives.
         bool    triggered_active_     = false;
         uint8_t triggered_next_row_   = 0;

@@ -56,9 +56,7 @@ ENV_RE = re.compile(r"^pico_v(\d)(\d)(\d)(?:_(\w+))?$")
 # here still works (falls back to a title-cased version of the variant name);
 # this is NOT what decides catalog membership, so a new PlatformIO env never
 # needs an entry here to be discovered correctly.
-LABELS = {"bcmtest": "BCM self-test", "spidiag": "SPI diagnostics",
-          "eintlow": "Active-low EINT trigger",
-          "eintlow_2p": "Active-low EINT, 2P line-sync (1 µs BCM base, free-running Triggered)"}
+LABELS = {"bcmtest": "BCM self-test", "spidiag": "SPI diagnostics"}
 
 
 def discover_catalog() -> list[dict]:
@@ -170,8 +168,7 @@ def build_leg(entry: dict, out: Path) -> None:
                              capture_output=True, text=True).stdout.strip() or "unknown"
         dirty = bool(subprocess.run(["git", "status", "--porcelain"],
                                     capture_output=True, text=True).stdout.strip())
-        abbrev = {"eintlow_2p": "2p", "eintlow": "elow", "spidiag": "sdiag",
-                  "bcmtest": "bcmt"}.get(entry["variant"], entry["variant"][:6])
+        abbrev = {"spidiag": "sdiag", "bcmtest": "bcmt"}.get(entry["variant"], entry["variant"][:6])
         cmd += ["--version", f"{abbrev}-{sha}{'-d' if dirty else ''}"[:15]]
     subprocess.run(cmd, check=True)
     bin_digest = sha256(bin_dest)

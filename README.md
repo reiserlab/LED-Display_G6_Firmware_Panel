@@ -33,6 +33,30 @@ Selected at build time with `-DPANEL_REV` (set per PlatformIO env):
 
 Pin tables: `docs/development/g6_02-led-mapping.md`.
 
+## EINT trigger modes
+
+Since panel-fw v1.3.0 there is one production build. The behavior that was the
+2P line-sync variant (`eintlow_2p`) is now the standard behavior:
+
+- **Triggered fires on the falling edge** of EINT (GP45). Its only source is
+  the ScanImage line clock, which is LOW during the resonant scanner's
+  turnaround gap.
+- **Triggered** (panel display mode 2: `0x12`/`0x32`/`0x52`/`0x62`) drives one
+  row per falling edge, wrapping 19→0 and running until a non-Triggered pattern
+  arrives. A re-streamed frame keeps the row position. Triggered rows use a
+  **1 µs** BCM base: a duty-255 Gray_16 row is ~15 µs, so it fits the ~18 µs
+  gap. Brightness at equal duty is ⅓ of the other modes; the rig tests
+  recommend duty ≤ 191.
+- **Gated** (mode 3) is unchanged: lit while EINT is HIGH. A pull-down keeps
+  an unconnected EINT dark in both modes.
+- **Persistent, Oneshot and error glyphs** don't read EINT and keep the 3 µs
+  base, so they are unchanged from v1.2.0.
+- The controller's STOP / ALL_OFF sends an all-dark Persistent frame, which
+  leaves Triggered mode and blanks the panel.
+
+Background and rig measurements: `panel/bench/2p-line-sync-2026-09-22.md`.
+Protocol: `g6_01-panel-protocol.md` in Modular-LED-Display.
+
 ## Toolchain
 
 Build/flash tooling is provided through [pixi](https://pixi.sh), which installs
@@ -55,11 +79,9 @@ pixi run platformio run -d panel -e pico_v031      # build v0.3.1 (or pico_v021)
 
 | Env | Build flags | Purpose |
 |---|---|---|
-| `pico_v021` / `pico_v031` | `PANEL_REV` | Production firmware. |
+| `pico_v021` / `pico_v031` | `PANEL_REV` | Production firmware. Triggered free-runs one row per EINT falling edge on a 1 µs BCM base, sized for 2P line sync (see [EINT modes](#eint-trigger-modes)). |
 | `pico_v021_spidiag` / `pico_v031_spidiag` | `+ SPI_DIAG=1` | Production + SPI/validity-gate **serial diagnostics**. Same SPI ingest — safe to deploy — but per-1000-message `Serial` prints run on core 0 and can cost the occasional frame. |
 | `pico_v021_bcmtest` / `pico_v031_bcmtest` | `+ STAGE2_SELFTEST=1` | BCM-via-PIO visual self-test. **No SPI ingest — DO NOT DEPLOY** for bench testing; re-flash a production env first. |
-| `pico_v021_eintlow` / `pico_v031_eintlow` | `+ EINT_ACTIVE_LOW=1` | Production with the EINT trigger polarity inverted: Triggered advances on HIGH→LOW edges, Gated lights while LOW, pull-up on an open line. For active-low trigger sources (imaging line clocks). Same SPI ingest — safe to deploy. |
-| `pico_v021_eintlow_2p` / `pico_v031_eintlow_2p` | `+ EINT_ACTIVE_LOW=1 BCM_BASE_ON_US=1.0f TRIGGERED_WRAP=1` | **2P line-sync** variant: active-low EINT, BCM base time 1 µs (a duty-255 row is ~15 µs, so it fits a resonant scanner's ~18 µs turnaround gap instead of ~50 µs) and free-running Triggered (one row per EINT edge, wrapping 19→0, row phase kept across re-streamed frames). Use with controller panel display mode 2. Brightness at a given duty is ⅓ of production. See `panel/bench/2p-line-sync-2026-09-22.md`. Same SPI ingest — safe to deploy. |
 | `pico_v031_twopiotimeouttest` | `+ TWOPIO_ROW_TIMEOUT_US=5` | Forced-fault repro for the two-PIO row-timeout recovery path (issue #21): every row burst times out, exercising the self-heal continuously. Same SPI ingest as production, but display timing is not representative — bench sessions only. Driven end-to-end by `tests/test_pr15_stuck_row_timeout.py` in [LED-Display_G6_Firmware_Arena](https://github.com/reiserlab/LED-Display_G6_Firmware_Arena). |
 | `pico_v031_twopiotimeoutdiag` | `+ TWOPIO_ROW_TIMEOUT_US=5 SPI_DIAG=1` | The forced-fault repro plus the SPI_DIAG heartbeat, which adds a live pin-state line (`PINS r=<rows> c=<cols>`, bit i = `ROW_PIN[i]`/`COL_PIN[i]` level; rows active-LOW = ON) for observing the fault at the GPIO level. |
 

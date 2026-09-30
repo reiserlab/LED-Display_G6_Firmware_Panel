@@ -31,6 +31,11 @@
 // serial command without reflashing. Production builds never modify it.
 extern float bcm_base_on_us;
 
+// Base ON time for Triggered patterns only (1.0 µs: a full-duty row is 15 µs,
+// short enough for a resonant scanner's turnaround gap — constants.h).
+// precompute_bcm_data() picks it from the pattern's display mode.
+extern float bcm_triggered_base_on_us;
+
 // System clock cycles per microsecond. Set in setup1() from
 // clock_get_hz(clk_sys) / 1000000UL (typically 150 on RP2350).
 extern uint32_t cycles_per_us;
