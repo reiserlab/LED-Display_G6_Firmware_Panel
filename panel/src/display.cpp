@@ -1,7 +1,6 @@
 #include "constants.h"
 #include "display.h"
 #include "bcm.h"
-#include "display_pio.h"
 #include "display_scan_twopio.h"
 #include "predef_patterns.h"
 #include "protocol.h"
@@ -129,8 +128,8 @@ Display::Display(queue_t &display_queue, queue_t &error_request_queue)
 
 void Display::initialize() {
     // S2.2: Initialize col and row pins as plain SIO outputs in their dark
-    // resting state. PIO will take over the col pins later via pio_start()
-    // (in setup1, AFTER this function returns). The ordering matters — see
+    // resting state. PIO will take over the col + row pins later via
+    // twopio_init() (in setup1, AFTER this function returns). The ordering matters — see
     // the comment block in main.cpp::setup1().
     col_pin_mask_ = 0;
     for (size_t i=0; i<PANEL_SIZE; i++) {
@@ -219,9 +218,7 @@ void Display::update() {
             triggered_active_   = false;
         }
         precompute_bcm_data(pat_);
-#if PANEL_REV == 31
         twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
-#endif
         if (pops > 1) frames_skipped_ += (pops - 1);
     }
 
@@ -314,9 +311,7 @@ void Display::enter_error_display(uint32_t slot) {
     oneshot_pending_      = false;     // Persistent within the error window
     triggered_active_     = false;     // suspended; will be restored on exit
     precompute_bcm_data(pat_);
-#if PANEL_REV == 31
     twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
-#endif
     error_until_us_       = time_us_64() + ERROR_DISPLAY_DURATION_US;
     error_display_active  = true;      // single-writer; volatile suffices
 }
@@ -348,22 +343,18 @@ void Display::exit_error_display() {
     triggered_active_   = saved_triggered_active_;
     triggered_next_row_ = saved_triggered_next_row_;
     precompute_bcm_data(pat_);
-#if PANEL_REV == 31
     twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
-#endif
 }
 
 
 bool Display::show_row(int r) {
     // Drive one row × all bit-planes for the current pat_. Called by:
-    //   - show()'s CPU-driven loop (v0.2.1 / PANEL_REV != 31 only; the
-    //     PANEL_REV==31 path calls twopio_scan_frame() directly instead)
     //   - show_gated() in the 20-row loop with per-row EINT check
     //   - V1 Triggered: one call per EINT trigger edge
     //
-    // Returns false if the row faulted (two-PIO completion-poll timeout,
-    // PANEL_REV==31 only; always true on the CPU-driven v0.2.1 path outside
-    // STAGE2_SELFTEST, which has no bounded failure mode in production).
+    // (show() scans whole frames through twopio_scan_frame() instead.)
+    //
+    // Returns false if the row faulted (two-PIO completion-poll timeout).
     //
     //   N = 1 for Gray_2 (single weight-15 plane)
     //   N = 4 for Gray_16 (weights {1, 2, 4, 8})
@@ -400,48 +391,10 @@ bool Display::show_row(int r) {
     //   departure (see plan).
     // ----------------------------------------------------------------------
     uint8_t bcm_bits = (pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4;
-#if PANEL_REV == 31
     // v0.3.1: both axes are PIO/DMA-driven — one autonomous burst scans this
     // row through all bit-planes. Reached by Triggered (one call per EINT
     // trigger edge) and Gated (one call per row, level checked between rows).
     return twopio_scan_row(r, bcm_bits);
-#else
-    PIO  pio = pio_get_instance();
-    uint sm  = pio_get_sm();
-
-#if STAGE2_SELFTEST
-    // Bench: CPU-row path has no autonomous burst to overlap, so injected
-    // "free work" lands here and adds directly to this row's scan time.
-    if (g_bench_inject_us) busy_wait_us(g_bench_inject_us);
-#endif
-    gpio_clr_mask64(row_on_mask[r]);   // row LOW = ON (normal polarity)
-    for (int b = 0; b < bcm_bits; b++) {
-        pio_sm_put_blocking(pio, sm, bcm_plane_data[r][b][0]);
-        pio_sm_put_blocking(pio, sm, bcm_plane_data[r][b][1]);
-        #if STAGE2_SELFTEST
-            // Selftest-only diagnostic: 100 µs timeout + fail-dark on
-            // missed PIO IRQ. Without this, a PIO mis-config silently
-            // hangs core 1 with one row LOW (LEDs stuck on indefinitely).
-            uint32_t t0 = time_us_32();
-            while (!pio_interrupt_get(pio, 0)) {
-                if ((uint32_t)(time_us_32() - t0) > 100) {
-                    gpio_set_mask64(row_on_mask[r]);   // row OFF
-                    Serial.print("PIO IRQ TIMEOUT row=");
-                    Serial.print(r);
-                    Serial.print(" plane=");
-                    Serial.println(b);
-                    pio_sm_set_enabled(pio, sm, false);
-                    return false;
-                }
-            }
-        #else
-            while (!pio_interrupt_get(pio, 0)) { tight_loop_contents(); }
-        #endif
-        pio_interrupt_clear(pio, 0);
-    }
-    gpio_set_mask64(row_on_mask[r]);   // row HIGH = OFF
-    return true;
-#endif
 }
 
 
@@ -463,9 +416,7 @@ void Display::show() {
     uint32_t c_start = m33_hw->dwt_cyccnt;   // cycle-precise scan-time start
 #endif
 
-#if PANEL_REV == 31
-    // v0.3.1: one DMA-fed two-PIO burst per row; core 1 only arms + polls,
-    // freed from the per-bit-plane FIFO push + IRQ busy-wait of the v0.2.1 path.
+    // One DMA-fed two-PIO burst per row; core 1 only arms + polls.
     int bcm_bits = (pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4;
     if (!twopio_scan_frame(bcm_bits)) {
         // Faulted frame: twopio already aborted DMA + re-primed the SMs. Skip
@@ -474,11 +425,6 @@ void Display::show() {
         // surfaces the fault count in the SPI_DIAG dump.
         return;
     }
-#else
-    for (int r = 0; r < PANEL_SIZE; r++) {
-        show_row(r);
-    }
-#endif
 
     uint32_t t_scan_end = time_us_32();
     uint32_t scan_us    = t_scan_end - t_start;

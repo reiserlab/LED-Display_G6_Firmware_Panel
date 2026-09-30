@@ -8,7 +8,6 @@
 #include "display.h"
 #include "bcm.h"
 #include "layout.h"
-#include "display_pio.h"
 #include "display_scan_twopio.h"
 #include "predef_patterns.h"
 #include "psram_store.h"
@@ -338,11 +337,9 @@ static void selftest_handle_serial() {
     }
     if (c == 'k') {
         // Reclaimable-headroom benchmark. Inject simulated "free work" per row
-        // and watch scan_us respond. On v0.3.1 two-PIO the work overlaps the
-        // autonomous DMA burst (scan stays flat until inject > per-row burst);
-        // on the v0.2.1 CPU-row path every injected µs adds straight to scan
-        // time. Run on both panels and compare — this is the reclaimable
-        // core-1 headroom the two-PIO scanner exposes.
+        // and watch scan_us respond. The work overlaps the autonomous two-PIO
+        // DMA burst, so scan stays flat until inject > per-row burst — the
+        // reclaimable core-1 headroom the two-PIO scanner exposes.
         Serial.println("Reclaimable-headroom (Gray_2 all-on duty=255; inject = free work us/row):");
         const uint32_t injects[] = {0, 10, 20, 40};
         Pattern bp; build_allon_gray2(bp, 255, DisplayMode::Persistent);
@@ -792,12 +789,12 @@ void setup1() {
     //   2. display.initialize() — sets cols + rows to SIO outputs in dark
     //      resting state (cols LOW, rows HIGH).
     //   3. init_index_maps() + precompute_scan_masks() — pure data.
-    //   4. pio_init_program() — dynamically claims a PIO SM; returns false
-    //      if none available. Caller fails dark.
-    //   5. pio_start() — switches col pins from SIO to PIO and starts the SM.
-    //      Once this runs, gpio_init() on the col pins (or anything that
+    //   4. twopio_init() — claims the row SM (PIO1) + col SM (PIO0) + two DMA
+    //      channels, switches col + row pins from SIO to PIO and primes both
+    //      SMs; returns false on resource failure. Caller fails dark.
+    //      Once this runs, gpio_init() on the col/row pins (or anything that
     //      reverts pin function to SIO) will break the PIO output silently.
-    //   6. Seed a Persistent all-off boot_pat so the BCM engine refreshes
+    //   5. Seed a Persistent all-off boot_pat so the BCM engine refreshes
     //      continuously even with no host pattern.
 
     cycles_per_us = clock_get_hz(clk_sys) / 1000000UL;
@@ -816,23 +813,12 @@ void setup1() {
     init_index_maps();
     precompute_scan_masks();
 
-#if PANEL_REV == 31
-    // v0.3.1: dual-PIO (rows on PIO1 + columns on PIO0) + dual-DMA scanner,
-    // replacing the v0.2.1 single-PIO-columns + CPU-GPIO-rows path.
+    // Dual-PIO (rows on PIO1 + columns on PIO0) + dual-DMA scanner.
     if (!twopio_init()) {
         Serial.println("FATAL: twopio_init() failed - display dark");
         twopio_fail_dark();
         while (true) { tight_loop_contents(); }
     }
-#else
-    if (!pio_init_program()) {
-        Serial.println("FATAL: pio_init_program() failed - display dark");
-        // Fail-dark: rows already HIGH (off), cols already LOW (off) from
-        // display.initialize(). Stay here.
-        while (true) { tight_loop_contents(); }
-    }
-    pio_start();
-#endif
 
     // Seed with all-off Persistent boot pattern so first scan iteration is
     // valid and the BCM engine continuously refreshes (cleaner than
@@ -841,9 +827,7 @@ void setup1() {
     Pattern boot_pat;
     boot_pat.set_mode(DisplayMode::Persistent);
     precompute_bcm_data(boot_pat);
-#if PANEL_REV == 31
     twopio_precompute((boot_pat.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
-#endif
 }
 
 void loop1() {

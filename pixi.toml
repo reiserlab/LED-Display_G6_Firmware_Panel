@@ -11,10 +11,8 @@ version = "0.2.0"
 release = "python panel/tools/build_release.py"
 diag    = "python panel/tools/build_release.py --group diag"
 
-# Flash every connected panel of a rev. See README.md "Flash & monitor".
-flash21                = { cmd = "python panel/tools/g6_flash.py --rev v0.2.1 --uf2 dist/g6-panel-v0.2.1.uf2", depends-on = ["release"] }
+# Flash every connected v0.3.1 panel. See README.md "Flash & monitor".
 flash31                = { cmd = "python panel/tools/g6_flash.py --rev v0.3.1 --uf2 dist/g6-panel-v0.3.1.uf2", depends-on = ["release"] }
-flash21-github-release = "python panel/tools/g6_flash.py --rev v0.2.1"
 flash31-github-release = "python panel/tools/g6_flash.py --rev v0.3.1"
 
 # Open a serial console on one panel by USB serial number. See README.md

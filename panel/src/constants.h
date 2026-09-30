@@ -4,18 +4,21 @@
 #include <hardware/spi.h>
 #include "protocol.h"
 
+// Hardware revision. Only the v0.3.1 panel is supported (v0.2.1 was retired in
+// panel-fw v1.3.0); PANEL_REV=31 is still passed from platformio.ini so a
+// build for any other board fails here instead of mis-driving its pins.
 #ifndef PANEL_REV
-#error "PANEL_REV not defined. Build with -DPANEL_REV=21 (v0.2.1) or -DPANEL_REV=31 (v0.3.1) from platformio.ini."
+#error "PANEL_REV not defined. Build with -DPANEL_REV=31 (v0.3.1) from platformio.ini."
 #endif
 
-#if (PANEL_REV != 21) && (PANEL_REV != 31)
-#error "Unsupported PANEL_REV. Only 21 (v0.2.1) and 31 (v0.3.1) are valid."
+#if PANEL_REV != 31
+#error "Unsupported PANEL_REV. Only 31 (v0.3.1) is supported."
 #endif
 
 // USB/Serial parameters
 extern const uint32_t BAUDRATE;
 
-// SPI peripheral instance (spi0 on v0.2.1, spi1 on v0.3.1) and pins
+// SPI peripheral instance (spi1) and pins
 extern spi_inst_t *const SPI_INST;
 extern const uint8_t SPI_SCK_PIN;
 extern const uint8_t SPI_MOSI_PIN;
@@ -69,7 +72,7 @@ extern const uint8_t EINT_PIN;
 extern const uint8_t COL_PIN[PANEL_SIZE];
 extern const uint8_t ROW_PIN[PANEL_SIZE];
 
-// LED polarity: both v0.2.1 and v0.3.1 are NORMAL polarity (col HIGH + row LOW = ON).
+// LED polarity: v0.3.1 is NORMAL polarity (col HIGH + row LOW = ON).
 // Differs from the v0.1 Janelia batch (which was reversed).
 constexpr bool COL_ON_LEVEL = true;   // column HIGH = ON
 constexpr bool ROW_ON_LEVEL = false;  // row LOW = ON

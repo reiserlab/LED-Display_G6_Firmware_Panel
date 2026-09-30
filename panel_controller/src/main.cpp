@@ -55,11 +55,11 @@ static constexpr uint32_t BITBANG_HALF_PERIOD_US = 2;  // -> ~250 kHz bit rate
 // hardware-SPI funcsel pin roles, so we can map outputs to the GPIOs whose
 // PCB traces go to the "MOSI" wire and "SCK" wire, and configure GP35 as an
 // input to read the peripheral's MISO drive. See constants.cpp for the per-rev
-// values of these macros (v0.2.1: 32/35/34/33; v0.3.1: 40/43/42/41).
-#define CONTROLLER_MOSI_OUT_PIN  SPI_MOSI_PIN  // GP32 on v0.2.1
-#define CONTROLLER_MISO_IN_PIN   SPI_MISO_PIN  // GP35 on v0.2.1
-#define CONTROLLER_SCK_OUT_PIN   SPI_SCK_PIN   // GP34 on v0.2.1
-#define CONTROLLER_CS_OUT_PIN    SPI_CS_PIN    // GP33 on v0.2.1
+// values of these macros (v0.3.1: 40/43/42/41).
+#define CONTROLLER_MOSI_OUT_PIN  SPI_MOSI_PIN  // GP40 on v0.3.1
+#define CONTROLLER_MISO_IN_PIN   SPI_MISO_PIN  // GP43 on v0.3.1
+#define CONTROLLER_SCK_OUT_PIN   SPI_SCK_PIN   // GP42 on v0.3.1
+#define CONTROLLER_CS_OUT_PIN    SPI_CS_PIN    // GP41 on v0.3.1
 
 static inline void cs_high() { gpio_put(CONTROLLER_CS_OUT_PIN,  1); }
 static inline void cs_low()  { gpio_put(CONTROLLER_CS_OUT_PIN,  0); }

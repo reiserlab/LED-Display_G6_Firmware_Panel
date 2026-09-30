@@ -12,7 +12,6 @@
 #include "bcm.h"
 #include "display_scan_twopio.h"
 
-#if PANEL_REV == 31
 
 #include <Arduino.h>
 #include <hardware/pio.h>
@@ -53,8 +52,8 @@ static const pio_program_t twopio_row_program = {
 #endif
 };
 
-// Col SM (PIO0, GPIOBASE=0, out base GP0, 20 pins). Same as the v0.2.1
-// led_col_program but with the terminal `irq wait 0` removed — the col SM
+// Col SM (PIO0, GPIOBASE=0, out base GP0, 20 pins). The retired v0.2.1
+// single-PIO led_col_program with the terminal `irq wait 0` removed — the col SM
 // loops autonomously, pulling the next {pattern, delay} as soon as DMA
 // provides it, and stalls at `pull block` when DMA stops feeding it.
 static const uint16_t twopio_col_program_insn[] = {
@@ -283,7 +282,7 @@ bool twopio_init() {
 
     // Switch pin funcsel from SIO (set by Display::initialize()) to PIO. After
     // this, any gpio_init() on these pins silently breaks PIO output — do not
-    // re-init col/row pins downstream (same hazard as the v0.2.1 column path).
+    // re-init col/row pins downstream.
     for (int r = 0; r < PANEL_SIZE; r++) pio_gpio_init(row_pio, ROW_PIN[r]);
     for (int c = 0; c < PANEL_SIZE; c++) pio_gpio_init(col_pio, COL_PIN[c]);
 
@@ -423,4 +422,3 @@ bool twopio_scan_frame(int bcm_bits) {
     return true;
 }
 
-#endif // PANEL_REV == 31

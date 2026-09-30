@@ -28,8 +28,10 @@ Selected at build time with `-DPANEL_REV` (set per PlatformIO env):
 
 | Rev | `PANEL_REV` | SPI | Notes |
 |---|---|---|---|
-| v0.2.1 | `21` | SPI0, GP32–35 | PSRAM CS on GP0 |
 | v0.3.1 | `31` | SPI1, GP40–43 | PSRAM CS on GP47; columns GP0–19, rows GP20–39 |
+
+v0.2.1 panels were retired in panel-fw v1.3.0; their envs and scan path are gone
+(the last release that builds them is `panel-fw-v1.2.0`).
 
 Pin tables: `docs/development/g6_02-led-mapping.md`.
 
@@ -72,16 +74,16 @@ directly once the environment is active.
 ## Build
 
 ```sh
-pixi run platformio run -d panel -e pico_v031      # build v0.3.1 (or pico_v021)
+pixi run platformio run -d panel -e pico_v031      # build v0.3.1
 ```
 
 ### PlatformIO environments
 
 | Env | Build flags | Purpose |
 |---|---|---|
-| `pico_v021` / `pico_v031` | `PANEL_REV` | Production firmware. Triggered free-runs one row per EINT falling edge on a 1 µs BCM base, sized for 2P line sync (see [EINT modes](#eint-trigger-modes)). |
-| `pico_v021_spidiag` / `pico_v031_spidiag` | `+ SPI_DIAG=1` | Production + SPI/validity-gate **serial diagnostics**. Same SPI ingest — safe to deploy — but per-1000-message `Serial` prints run on core 0 and can cost the occasional frame. |
-| `pico_v021_bcmtest` / `pico_v031_bcmtest` | `+ STAGE2_SELFTEST=1` | BCM-via-PIO visual self-test. **No SPI ingest — DO NOT DEPLOY** for bench testing; re-flash a production env first. |
+| `pico_v031` | `PANEL_REV` | Production firmware. Triggered free-runs one row per EINT falling edge on a 1 µs BCM base, sized for 2P line sync (see [EINT modes](#eint-trigger-modes)). |
+| `pico_v031_spidiag` | `+ SPI_DIAG=1` | Production + SPI/validity-gate **serial diagnostics**. Same SPI ingest — safe to deploy — but per-1000-message `Serial` prints run on core 0 and can cost the occasional frame. |
+| `pico_v031_bcmtest` | `+ STAGE2_SELFTEST=1` | BCM-via-PIO visual self-test. **No SPI ingest — DO NOT DEPLOY** for bench testing; re-flash a production env first. |
 | `pico_v031_twopiotimeouttest` | `+ TWOPIO_ROW_TIMEOUT_US=5` | Forced-fault repro for the two-PIO row-timeout recovery path (issue #21): every row burst times out, exercising the self-heal continuously. Same SPI ingest as production, but display timing is not representative — bench sessions only. Driven end-to-end by `tests/test_pr15_stuck_row_timeout.py` in [LED-Display_G6_Firmware_Arena](https://github.com/reiserlab/LED-Display_G6_Firmware_Arena). |
 | `pico_v031_twopiotimeoutdiag` | `+ TWOPIO_ROW_TIMEOUT_US=5 SPI_DIAG=1` | The forced-fault repro plus the SPI_DIAG heartbeat, which adds a live pin-state line (`PINS r=<rows> c=<cols>`, bit i = `ROW_PIN[i]`/`COL_PIN[i]` level; rows active-LOW = ON) for observing the fault at the GPIO level. |
 
@@ -109,7 +111,7 @@ panel/tools/build_release.py --list` shows the current catalog.
 
 **CAUTION:** bcmtest firmware has **no SPI ingest** — a panel ISP'd with a bcmtest
 `.bin` can no longer be reflashed over SPI afterwards. Recover it via
-`flash21-github-release`/`flash31-github-release` (USB) instead of a second ISP push.
+`flash31-github-release` (USB) instead of a second ISP push.
 
 ## Flash & monitor
 
@@ -118,30 +120,29 @@ target. On Linux it's `picotool`-based (see NOTE below); on macOS it instead
 does a 1200-baud BOOTSEL touch + UF2 copy to the `/Volumes/RP2350` mount
 (picotool's libusb backend can't reliably claim a CDC interface macOS's own
 kernel driver already owns), which limits macOS to **one panel per
-invocation** — `--serial`/`--port` is required there, and `flash21`/`flash31`
-(which flash every connected panel of a rev) are Linux-only. Windows is
-unsupported. `flash21`/`flash31` flash EVERY connected panel of a rev on
-Linux:
+invocation** — `--serial`/`--port` is required there, and `flash31`
+(which flashes every connected panel) is Linux-only. Windows is
+unsupported. `flash31` flashes EVERY connected panel on Linux:
 
 ```sh
 pixi run flash31                    # build the FULL release catalog, then flash all v0.3.1 panels
 pixi run flash31-github-release     # flash the latest PUBLISHED release, no local build
 ```
 
-(`*21`/`*21-github-release` variants target v0.2.1.) `flash21`/`flash31` build the
+`flash31` builds the
 full release catalog first (`pixi run release`) and flash the resulting
 `dist/g6-panel-<rev>.uf2` — the exact bytes `pixi run release`/CI would
 publish, without needing to cut a release or have network access.
-`flash21-github-release`/`flash31-github-release` skip the local build
+`flash31-github-release` skips the local build
 entirely and flash the latest published release (just `picotool` + network
 needed).
 
 > To flash **one specific device** instead of every connected panel,
 > build+package just that catalog entry then call `g6_flash.py` directly:
 > ```sh
-> python panel/tools/build_release.py --only g6-panel-v0.2.1   # or -bcmtest / -spidiag / etc.
-> python panel/tools/g6_flash.py --rev v0.2.1 \
->     --uf2 dist/g6-panel-v0.2.1.uf2 --serial <THAT_SERIAL>
+> python panel/tools/build_release.py --only g6-panel-v0.3.1   # or -bcmtest / -spidiag / etc.
+> python panel/tools/g6_flash.py --rev v0.3.1 \
+>     --uf2 dist/g6-panel-v0.3.1.uf2 --serial <THAT_SERIAL>
 > ```
 > Find a board's serial with `python panel/tools/g6_flash.py --list`. A panel
 > stuck in BOOTSEL is **not** a problem — `g6_flash.py` flashes it directly —

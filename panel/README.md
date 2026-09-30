@@ -38,7 +38,7 @@ and error-glyph slot indices).
 
 ## Build flags
 
-- `PANEL_REV` — `21` (v0.2.1) or `31` (v0.3.1); selects pin map and SPI block.
+- `PANEL_REV` — `31` (v0.3.1, the only supported rev); selects pin map and SPI block.
 - `RP2350_PSRAM_CS` — PSRAM chip-select GPIO (per rev).
 - `SPI_DIAG=1` — enable the SPI timing + validity-gate serial diagnostics in
   `messenger.cpp` (off by default; see parent README).

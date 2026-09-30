@@ -107,7 +107,7 @@ def discover_catalog() -> list[dict]:
                   "neither 'common' nor another pico_v* env", file=sys.stderr)
             continue
 
-        usb_product = f"G6 Panel {rev[:-2]}"  # "v0.2.1" -> "G6 Panel v0.2"
+        usb_product = f"G6 Panel {rev[:-2]}"  # "v0.3.1" -> "G6 Panel v0.3"
         label_text = LABELS.get(variant, variant.replace("_", " ").title())
         slug_variant = variant.replace("_", "-")
         slug = f"g6-panel-{rev}" if variant == "production" else f"g6-panel-{rev}-{slug_variant}"

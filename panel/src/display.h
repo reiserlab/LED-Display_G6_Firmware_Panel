@@ -22,7 +22,7 @@ class Display {
         // Drive a single row × all bit-planes of the current pat_. Used by
         // both show_gated() (in its 20-row loop) and the V1 Triggered state
         // machine (one call per EINT trigger edge). Returns false if the row
-        // faulted (two-PIO completion-poll timeout, PANEL_REV==31 only) so
+        // faulted (two-PIO completion-poll timeout) so
         // Triggered can retry the same row on the next edge instead of
         // silently advancing past it (next-steps-pr-15.md #1 / gh-16 #1).
         bool show_row(int r);
@@ -104,10 +104,8 @@ void display_get_scan_stats(ScanStats &out);
 
 #if STAGE2_SELFTEST
 // Bench only: simulated per-row "free work" (µs) for the 'k' reclaimable-
-// headroom test. On v0.3.1 two-PIO this busy-wait overlaps the autonomous DMA
-// burst (hidden from scan time until it exceeds the per-row burst); on the
-// v0.2.1 CPU-row path it adds straight to scan time (core 1 must be present to
-// feed each bit-plane). 0 = disabled.
+// headroom test. The busy-wait overlaps the autonomous two-PIO DMA burst
+// (hidden from scan time until it exceeds the per-row burst). 0 = disabled.
 extern volatile uint32_t g_bench_inject_us;
 
 // Cycle-precise (DWT CYCCNT) per-frame scan-time stats for the 'j' jitter

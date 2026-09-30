@@ -12,7 +12,6 @@
 #include "bcm.h"
 #include "constants.h"
 #include "layout.h"
-#include "display_pio.h"
 #include "protocol.h"
 
 // Globals defined in this TU and declared extern in bcm.h.

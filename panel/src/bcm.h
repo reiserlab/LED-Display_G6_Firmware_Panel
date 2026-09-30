@@ -36,6 +36,12 @@ extern float bcm_base_on_us;
 // precompute_bcm_data() picks it from the pattern's display mode.
 extern float bcm_triggered_base_on_us;
 
+// Column-program ON overhead: 5 cycles per bit-plane (pull + mov + jmp loop
+// entry + mov + out), ~33 ns at 150 MHz regardless of the delay value.
+// precompute_bcm_data() subtracts it from each plane's delay; it sets the
+// brightness floor (very-low-duty_cycle nonlinearity).
+constexpr uint32_t PIO_ON_OVERHEAD_CYCLES = 5;
+
 // System clock cycles per microsecond. Set in setup1() from
 // clock_get_hz(clk_sys) / 1000000UL (typically 150 on RP2350).
 extern uint32_t cycles_per_us;

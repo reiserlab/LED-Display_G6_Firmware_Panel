@@ -105,12 +105,10 @@ void diag_dump() {
         diag_emit(b, snprintf(b, sizeof(b), "txCIPO= %02X %02X %02X\r\n",
                               tx3[0], tx3[1], tx3[2]));
     }
-#if PANEL_REV == 31
     // v0.3.1 two-PIO scanner fault counter (should stay 0). Non-zero means a
     // per-row burst hit its completion-poll timeout and self-healed.
     diag_emit(b, snprintf(b, sizeof(b), "twopio_timeouts=%lu\r\n",
                           (unsigned long)twopio_get_timeouts()));
-#endif
     // V2 PSRAM reception summary (only meaningful once V2 traffic has run).
     if (diag_psram_cmds || diag_psram_oor) {
         unsigned distinct = 0;
@@ -159,10 +157,8 @@ void diag_heartbeat() {
     if (hb_last_ms == 0) {                 // prime baseline, print nothing yet
         hb_last_ms = now; hb_last_msgs = diag_msgs; hb_last_reject = diag_reject_any;
         hb_last_skip = display.frames_skipped();
-#if PANEL_REV == 31
         hb_last_to = twopio_get_timeouts();
         { uint32_t a,b2,c,d2; twopio_get_longrow(a,b2,c,d2); }  // clear window max
-#endif
         display_reset_scan_stats();
         return;
     }
@@ -175,10 +171,8 @@ void diag_heartbeat() {
     uint32_t d_skip = skip_t - hb_last_skip;
     uint32_t to_t   = 0, d_to = 0;
     uint32_t rmx_us = 0, rmx_row = 0, rall_us = 0, rall_row = 0;
-#if PANEL_REV == 31
     to_t = twopio_get_timeouts(); d_to = to_t - hb_last_to;
     twopio_get_longrow(rmx_us, rmx_row, rall_us, rall_row);  // read-and-clear window max
-#endif
     ScanStats ss; display_get_scan_stats(ss);
     uint32_t per_avg  = ss.count ? (uint32_t)(ss.period_us_total / ss.count) : 0;
     uint32_t scan_avg = ss.count ? (uint32_t)(ss.scan_us_total   / ss.count) : 0;
@@ -203,8 +197,7 @@ void diag_heartbeat() {
     // Live pin-level snapshot as its own SHORT line (diag_emit clamps writes
     // to ~159 bytes — gh-16 item 2 — so this cannot ride on the HB line).
     // Input synchronizers read the pad regardless of funcsel. Bit i of each
-    // field is ROW_PIN[i]/COL_PIN[i]'s level, so the output is correct for
-    // both revisions (v0.2.1's pins are neither contiguous nor 0-based).
+    // field is ROW_PIN[i]/COL_PIN[i]'s level, independent of the pin map.
     // Rows are active-LOW = ON; cols HIGH = ON.
     uint64_t gpins = gpio_get_all64();
     uint32_t pin_rows = 0, pin_cols = 0;
@@ -334,7 +327,7 @@ Messenger::Messenger(queue_t &display_queue, queue_t &error_request_queue)
 
 void Messenger::initialize() {
 
-    // Setup SPI (SPI_INST = spi0 on v0.2.1, spi1 on v0.3.1; see constants.cpp)
+    // Setup SPI (SPI_INST = spi1; see constants.cpp)
     spi_init(SPI_INST, SPI_SPEED);
     gpio_init(SPI_SCK_PIN);
     gpio_init(SPI_MOSI_PIN);
