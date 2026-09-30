@@ -455,8 +455,8 @@ static void selftest_handle_serial() {
     if (c == 'T') {
         // V1 Triggered (cmd 0x12) selftest: push an all-on Gray_2 pattern
         // tagged DisplayMode::Triggered. Drive GP45 with a function gen
-        // (1-1000 Hz square wave) to advance rows; 20 rising edges = one
-        // visible frame; then dark until another T.
+        // (square wave) to advance rows: one row per FALLING edge, wrapping
+        // 19->0 until another pattern (the autocycle, or f/F/...) replaces it.
         Pattern p;
         build_allon_gray2(p, 255, DisplayMode::Triggered);
         if (!queue_try_add(&display_queue, &p)) {
@@ -467,7 +467,7 @@ static void selftest_handle_serial() {
         // its own pattern on the next iteration once Triggered completes.
         st_last_idx     = -1;
         st_last_duty_cycle = 0xFF;
-        Serial.println("Triggered all-on Gray_2 queued; drive GP45 rising edges to advance rows (20 = 1 frame)");
+        Serial.println("Triggered all-on Gray_2 queued; drive GP45 falling edges to advance rows (free-running)");
         return;
     }
     if (c == 'g') {

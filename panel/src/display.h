@@ -70,6 +70,12 @@ class Display {
         // pushing or Display::update() is starving (e.g., scan loop hung).
         uint32_t frames_skipped_ = 0;
 
+        // Rebuild bcm_plane_data + the two-PIO row tables for pat_ and record
+        // the BCM base they were built with (precomputed_base_us_), so
+        // update() can skip the rebuild for a byte-identical re-streamed frame.
+        void rebuild_scan_data();
+        float precomputed_base_us_ = -1.0f;
+
         // Begin / end the error-display window (called only from core 1).
         void enter_error_display(uint32_t slot);
         void exit_error_display();

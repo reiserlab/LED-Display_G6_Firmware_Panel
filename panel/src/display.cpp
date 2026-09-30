@@ -117,6 +117,15 @@ void display_get_scan_stats(ScanStats &out) {
 }
 
 
+// True if `a` and `b` would produce identical scan data: same pixels, gray
+// level, duty cycle and display mode (mode selects the BCM base). ~400 byte
+// compares — far cheaper than precompute_bcm_data().
+static bool same_scan_content(Pattern &a, Pattern &b) {
+    return a.mode() == b.mode() && a.gray_level() == b.gray_level()
+        && a.duty_cycle() == b.duty_cycle() && a.matrix() == b.matrix();
+}
+
+
 // Cross-core flag — defined here, declared in display.h.
 volatile bool Display::error_display_active = false;
 
@@ -202,6 +211,14 @@ void Display::update() {
         pops++;
     }
     if (pops > 0) {
+        // The controller re-streams the same frame continuously (300 Hz on the
+        // 2P rigs). Rebuilding scan data costs ~100-150 µs — one or two line
+        // clock edges in Triggered — so skip it when nothing would change:
+        // the scan data already describes pat_ (every pat_ assignment is
+        // followed by a rebuild) and was built with the base `latest` needs
+        // (the selftest 'b' retune re-pushes the same pattern to rebuild).
+        bool unchanged = have_pattern_ && same_scan_content(latest, pat_)
+                      && bcm_base_on_us_for(latest) == precomputed_base_us_;
         pat_ = latest;
         have_pattern_ = true;
         oneshot_pending_ = (pat_.mode() == DisplayMode::Oneshot);
@@ -217,8 +234,7 @@ void Display::update() {
         } else {
             triggered_active_   = false;
         }
-        precompute_bcm_data(pat_);
-        twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
+        if (!unchanged) rebuild_scan_data();
         if (pops > 1) frames_skipped_ += (pops - 1);
     }
 
@@ -310,10 +326,16 @@ void Display::enter_error_display(uint32_t slot) {
     have_pattern_         = true;
     oneshot_pending_      = false;     // Persistent within the error window
     triggered_active_     = false;     // suspended; will be restored on exit
-    precompute_bcm_data(pat_);
-    twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
+    rebuild_scan_data();
     error_until_us_       = time_us_64() + ERROR_DISPLAY_DURATION_US;
     error_display_active  = true;      // single-writer; volatile suffices
+}
+
+
+void Display::rebuild_scan_data() {
+    precompute_bcm_data(pat_);
+    twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
+    precomputed_base_us_ = bcm_base_on_us_for(pat_);
 }
 
 
@@ -322,6 +344,19 @@ void Display::exit_error_display() {
 
     if (!saved_have_pattern_) {
         // Nothing was displayed before the error — go dark.
+        have_pattern_     = false;
+        oneshot_pending_  = false;
+        triggered_active_ = false;
+        return;
+    }
+
+    if (saved_pattern_.mode() == DisplayMode::Triggered) {
+        // Free-running Triggered does not resume after an error: go dark
+        // until the next command. Messenger ignores every command during the
+        // window (spec receive-and-ignore), so a STOP / ALL_OFF sent then is
+        // lost — resuming would light the stale frame on every line edge
+        // forever. A controller mid-trial re-streams within ~3 ms, which
+        // restarts Triggered at row 0.
         have_pattern_     = false;
         oneshot_pending_  = false;
         triggered_active_ = false;
@@ -342,8 +377,7 @@ void Display::exit_error_display() {
     oneshot_pending_    = saved_oneshot_pending_;
     triggered_active_   = saved_triggered_active_;
     triggered_next_row_ = saved_triggered_next_row_;
-    precompute_bcm_data(pat_);
-    twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
+    rebuild_scan_data();
 }
 
 

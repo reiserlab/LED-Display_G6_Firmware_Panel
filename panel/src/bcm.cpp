@@ -29,6 +29,14 @@ void precompute_scan_masks() {
 }
 
 
+float bcm_base_on_us_for(Pattern &pat) {
+    // Triggered rows must fit the line-sync gap, so that mode has its own,
+    // shorter base (constants.h). Every other mode uses the 1 kHz base.
+    return (pat.mode() == DisplayMode::Triggered) ? bcm_triggered_base_on_us
+                                                  : bcm_base_on_us;
+}
+
+
 void precompute_bcm_data(Pattern &pat) {
     uint8_t duty_cycle = pat.duty_cycle();
     uint8_t bcm_bits;
@@ -59,11 +67,7 @@ void precompute_bcm_data(Pattern &pat) {
         return;
     }
 
-    // Triggered rows must fit the line-sync gap, so that mode has its own,
-    // shorter base (constants.h). Every other mode uses the 1 kHz base.
-    float base_on_us = (pat.mode() == DisplayMode::Triggered)
-                     ? bcm_triggered_base_on_us : bcm_base_on_us;
-    uint32_t base_cycles = (uint32_t)(base_on_us * (float)cycles_per_us);
+    uint32_t base_cycles = (uint32_t)(bcm_base_on_us_for(pat) * (float)cycles_per_us);
 
     // Per-plane PIO delay = (base_cycles * weight * duty_cycle / 255) - 5
     // overhead. At very low duty_cycle the scaled time may fall below the

@@ -159,7 +159,7 @@ def build_leg(entry: dict, out: Path) -> None:
         cmd += ["--version", release_tag]
     elif entry["variant"] != "production":
         # Untagged variant build: name the variant in the footer so a panel
-        # flashed with e.g. the 2P line-sync build reports it through
+        # flashed with e.g. the spidiag build reports it through
         # GET_FIRMWARE_INFO / the ISP verify sweep instead of looking like a
         # plain <sha8>[-d] dev build of production (Codex review 2026-09-22:
         # same opcodes, different timing contract, needs runtime identity).
@@ -220,6 +220,15 @@ def main(argv: list[str] | None = None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     for entry in entries:
         build_leg(entry, out)
+
+    # Drop staged metadata for envs no longer in the catalog (e.g. a dist/ left
+    # over from a release that still built v0.2.1), so a local manifest never
+    # advertises retired firmware. Their .uf2/.bin files are left alone.
+    known = {e["slug"] for e in catalog}
+    for stale in out.glob("artifact-*.json"):
+        if stale.stem[len("artifact-"):] not in known:
+            print(f"build-release: dropping stale {stale.name} (not in the catalog)")
+            stale.unlink()
 
     # manifest.json is assembled from whatever artifact-*.json is present in
     # `out` — so `--only`, or running `release` and `diag` into the

@@ -70,4 +70,8 @@ void precompute_scan_masks();
 // Display::update() on each new pattern dequeue.
 void precompute_bcm_data(Pattern &pat);
 
+// The BCM base ON time (µs) precompute_bcm_data() uses for `pat`: the
+// Triggered base for Triggered patterns, bcm_base_on_us otherwise.
+float bcm_base_on_us_for(Pattern &pat);
+
 #endif

@@ -45,7 +45,10 @@ Since panel-fw v1.3.0 there is one production build. The behavior that was the
   turnaround gap.
 - **Triggered** (panel display mode 2: `0x12`/`0x32`/`0x52`/`0x62`) drives one
   row per falling edge, wrapping 19→0 and running until a non-Triggered pattern
-  arrives. A re-streamed frame keeps the row position. Triggered rows use a
+  arrives. A re-streamed frame keeps the row position; an identical re-stream
+  costs nothing, but a changed frame is rebuilt between rows (~100–150 µs,
+  so 1–2 line edges at 15.8 kHz draw no row). After an error glyph, a
+  Triggered panel stays dark until the next command. Triggered rows use a
   **1 µs** BCM base: a duty-255 Gray_16 row is ~15 µs, so it fits the ~18 µs
   gap. Brightness at equal duty is ⅓ of the other modes; the rig tests
   recommend duty ≤ 191.
@@ -87,7 +90,7 @@ pixi run platformio run -d panel -e pico_v031      # build v0.3.1
 | `pico_v031_twopiotimeouttest` | `+ TWOPIO_ROW_TIMEOUT_US=5` | Forced-fault repro for the two-PIO row-timeout recovery path (issue #21): every row burst times out, exercising the self-heal continuously. Same SPI ingest as production, but display timing is not representative — bench sessions only. Driven end-to-end by `tests/test_pr15_stuck_row_timeout.py` in [LED-Display_G6_Firmware_Arena](https://github.com/reiserlab/LED-Display_G6_Firmware_Arena). |
 | `pico_v031_twopiotimeoutdiag` | `+ TWOPIO_ROW_TIMEOUT_US=5 SPI_DIAG=1` | The forced-fault repro plus the SPI_DIAG heartbeat, which adds a live pin-state line (`PINS r=<rows> c=<cols>`, bit i = `ROW_PIN[i]`/`COL_PIN[i]` level; rows active-LOW = ON) for observing the fault at the GPIO level. |
 
-`pixi run release` builds+packages the two production envs into `dist/`:
+`pixi run release` builds+packages the production env into `dist/`:
 
 - `dist/g6-panel-<rev>.uf2` — for the `g6-flash` CLI / WebUSB flasher / GitHub Release.
 - `dist/g6-panel-<rev>.bin` — the same firmware wrapped in a 32-byte ISP footer
