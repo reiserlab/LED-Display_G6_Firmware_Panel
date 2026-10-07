@@ -321,18 +321,18 @@ bool twopio_init() {
 }
 
 // ---------------------------------------------------------------------------
-void twopio_precompute(int bcm_bits) {
-    if (bcm_bits < 1) bcm_bits = 1;
-    if (bcm_bits > 4) bcm_bits = 4;
+void twopio_precompute(int nplanes) {
+    if (nplanes < 1) nplanes = 1;
+    if (nplanes > BCM_MAX_PLANES) nplanes = BCM_MAX_PLANES;
     const uint32_t ALL_ROWS_OFF_20  = 0xFFFFFu;   // 20-bit, all rows HIGH = OFF
     const uint32_t ROW_SAFETY_MARGIN = 10;        // PIO cycles of overshoot
     for (int r = 0; r < PANEL_SIZE; r++) {
         // Inverted one-hot on the GP20 base (ROW_PIN[r]-20 → bit 0..19).
         row_data[r * 2 + 0] = ALL_ROWS_OFF_20 & ~(1UL << (ROW_PIN[r] - 20));
-        // Row hold = sum of the row's column bit-plane wall-clock durations.
+        // Row hold = sum of the row's column plane wall-clock durations.
         uint32_t total_col_cycles = 0;
-        for (int b = 0; b < bcm_bits; b++) {
-            total_col_cycles += bcm_plane_data[r][b][1] + TWOPIO_COL_OVERHEAD;
+        for (int p = 0; p < nplanes; p++) {
+            total_col_cycles += bcm_plane_data[r][p][1] + TWOPIO_COL_OVERHEAD;
         }
         total_col_cycles += ROW_SAFETY_MARGIN;
         row_data[r * 2 + 1] = (total_col_cycles > TWOPIO_ROW_OVERHEAD)
@@ -363,17 +363,17 @@ static bool wait_burst_done() {
 }
 
 // ---------------------------------------------------------------------------
-bool twopio_scan_row(int r, int bcm_bits) {
-    if ((unsigned)r >= (unsigned)PANEL_SIZE || bcm_bits < 1 || bcm_bits > 4) {
+bool twopio_scan_row(int r, int nplanes) {
+    if ((unsigned)r >= (unsigned)PANEL_SIZE || nplanes < 1 || nplanes > BCM_MAX_PLANES) {
         return false;
     }
-    // Row: 2 words {pattern, delay}. Col: bcm_bits {col_word, pio_delay} pairs,
-    // straight out of bcm_plane_data[r] (contiguous [4][2] layout). Start both
-    // in lockstep so they share a common phase origin.
+    // Row: 2 words {pattern, delay}. Col: nplanes {col_word, pio_delay} pairs,
+    // straight out of bcm_plane_data[r] (contiguous [BCM_MAX_PLANES][2]
+    // layout). Start both in lockstep so they share a common phase origin.
     dma_channel_set_read_addr(ch_row, &row_data[r * 2], false);
     dma_channel_set_trans_count(ch_row, 2, false);
     dma_channel_set_read_addr(ch_col, &bcm_plane_data[r][0][0], false);
-    dma_channel_set_trans_count(ch_col, (uint)(bcm_bits * 2), false);
+    dma_channel_set_trans_count(ch_col, (uint)(nplanes * 2), false);
     dma_start_channel_mask((1u << ch_row) | (1u << ch_col));
 
 #if STAGE2_SELFTEST
@@ -405,7 +405,7 @@ bool twopio_scan_row(int r, int bcm_bits) {
         scan_timeouts++;
 #if STAGE2_SELFTEST
         Serial.print("TWOPIO TIMEOUT row="); Serial.print(r);
-        Serial.print(" bits="); Serial.print(bcm_bits);
+        Serial.print(" planes="); Serial.print(nplanes);
         Serial.print(" total="); Serial.println((unsigned long)scan_timeouts);
 #endif
         twopio_prime();
@@ -415,9 +415,9 @@ bool twopio_scan_row(int r, int bcm_bits) {
 }
 
 // ---------------------------------------------------------------------------
-bool twopio_scan_frame(int bcm_bits) {
+bool twopio_scan_frame(int nplanes) {
     for (int r = 0; r < PANEL_SIZE; r++) {
-        if (!twopio_scan_row(r, bcm_bits)) return false;
+        if (!twopio_scan_row(r, nplanes)) return false;
     }
     return true;
 }

@@ -10,6 +10,7 @@
 //   - duty_cycle == 0 zeroes ALL column words (strict-off per spec)
 
 #include "bcm.h"
+#include "bank_logic.h"
 #include "constants.h"
 #include "layout.h"
 #include "protocol.h"
@@ -18,7 +19,7 @@
 float    bcm_base_on_us           = BCM_BASE_ON_US;            // 3.0 µs (1 kHz refresh); selftest can retune
 float    bcm_triggered_base_on_us = BCM_TRIGGERED_BASE_ON_US;  // 1.0 µs, Triggered only (constants.h)
 uint32_t cycles_per_us  = 150;        // overwritten in setup1() from clock_get_hz()
-uint32_t bcm_plane_data[PANEL_SIZE][4][2];
+uint32_t bcm_plane_data[PANEL_SIZE][BCM_MAX_PLANES][2];
 uint64_t row_on_mask[PANEL_SIZE];
 
 
@@ -37,39 +38,76 @@ float bcm_base_on_us_for(Pattern &pat) {
 }
 
 
-void precompute_bcm_data(Pattern &pat) {
-    precompute_bcm_data(pat, bcm_base_on_us_for(pat));
+int precompute_bcm_data(Pattern &pat) {
+    return precompute_bcm_data(pat, bcm_base_on_us_for(pat));
 }
 
 
-void precompute_bcm_data(Pattern &pat, float base_on_us) {
-    uint8_t duty_cycle = pat.duty_cycle();
-    uint8_t bcm_bits;
-    uint32_t bcm_weights[4] = {0, 0, 0, 0};
+// Gray_2: 1 plane with weight 15 (equals Gray_16's full-bright sum).
+// Gray_16: 4 planes with weights {1, 2, 4, 8}.
+static int gray_bits(Pattern &pat) {
+    return (pat.gray_level() == GrayLevel::Gray_2) ? 1 : 4;
+}
+static const uint32_t GRAY2_WEIGHTS[1]  = {15};
+static const uint32_t GRAY16_WEIGHTS[4] = {1, 2, 4, 8};
+static const uint32_t GRAY_WEIGHT_SUM   = 15;   // both gray levels
 
-    if (pat.gray_level() == GrayLevel::Gray_2) {
-        bcm_bits        = 1;
-        bcm_weights[0]  = 15;          // single plane, full-bright weight
-    } else {                            // Gray_16
-        bcm_bits        = 4;
-        bcm_weights[0]  = 1;
-        bcm_weights[1]  = 2;
-        bcm_weights[2]  = 4;
-        bcm_weights[3]  = 8;
+
+// Zero every plane from `first` up (col word and delay), so the scan loop
+// never sees stale data even if the plane count shrinks mid-flight (e.g. a
+// Gray_16 -> Gray_2 transition).
+static void zero_planes_from(int first) {
+    for (int r = 0; r < PANEL_SIZE; r++) {
+        for (int p = first; p < BCM_MAX_PLANES; p++) {
+            bcm_plane_data[r][p][0] = 0x00000;
+            bcm_plane_data[r][p][1] = 0;
+        }
     }
+}
+
+
+// Column words per schematic row and bit-plane: for each layout pixel, OR
+// its bit-plane contributions into its schematic row's column pattern.
+static void build_plane_words(Pattern &pat, int bcm_bits,
+                              uint32_t words[PANEL_SIZE][4]) {
+    for (int r = 0; r < PANEL_SIZE; r++)
+        for (int b = 0; b < 4; b++)
+            words[r][b] = 0x00000;
+
+    for (int lr = 0; lr < PANEL_SIZE; lr++) {
+        for (int lc = 0; lc < PANEL_SIZE; lc++) {
+            uint8_t sch_row = layout_to_sch_row[lr][lc];
+            uint8_t sch_col = layout_to_sch_col[lr][lc];
+            uint8_t intensity = pat.matrix()(lr, lc)
+                              & ((bcm_bits == 1) ? 0x01 : 0x0F);
+
+            // Gray_2: intensity ∈ {0,1}; set the single plane iff intensity != 0
+            // Gray_16: intensity ∈ [0,15]; set each plane b iff (intensity >> b) & 1
+            for (int b = 0; b < bcm_bits; b++) {
+                bool set_this_plane = (bcm_bits == 1)
+                                    ? (intensity != 0)
+                                    : ((intensity >> b) & 1);
+                if (set_this_plane) {
+                    words[sch_row][b] |= (1UL << sch_col);
+                }
+            }
+        }
+    }
+}
+
+
+int precompute_bcm_data(Pattern &pat, float base_on_us) {
+    uint8_t duty_cycle = pat.duty_cycle();
+    int bcm_bits = gray_bits(pat);
+    const uint32_t *bcm_weights = (bcm_bits == 1) ? GRAY2_WEIGHTS : GRAY16_WEIGHTS;
 
     // Strict-off guard: at duty_cycle == 0, zero ALL column words so no LEDs
     // light. The PIO program will still emit its 33 ns (5-cycle) overhead
     // pulse per plane, but with col_word == 0 those overhead pulses drive no
     // LEDs. Documented spec semantics.
     if (duty_cycle == 0) {
-        for (int r = 0; r < PANEL_SIZE; r++) {
-            for (int b = 0; b < 4; b++) {
-                bcm_plane_data[r][b][0] = 0x00000;
-                bcm_plane_data[r][b][1] = 0;
-            }
-        }
-        return;
+        zero_planes_from(0);
+        return bcm_bits;
     }
 
     uint32_t base_cycles = (uint32_t)(base_on_us * (float)cycles_per_us);
@@ -87,40 +125,64 @@ void precompute_bcm_data(Pattern &pat, float base_on_us) {
                       ? (scaled - PIO_ON_OVERHEAD_CYCLES) : 0;
     }
 
-    // Initialize all rows × planes to all-off + per-plane delay.
+    uint32_t words[PANEL_SIZE][4];
+    build_plane_words(pat, bcm_bits, words);
     for (int r = 0; r < PANEL_SIZE; r++) {
         for (int b = 0; b < bcm_bits; b++) {
-            bcm_plane_data[r][b][0] = 0x00000;
+            bcm_plane_data[r][b][0] = words[r][b];
             bcm_plane_data[r][b][1] = pio_delays[b];
         }
-        // Zero out any unused planes (Gray_2 has 3 unused planes) so the scan
-        // loop reading them never sees stale data even if bcm_bits changes
-        // mid-flight on a Gray_16 → Gray_2 transition.
-        for (int b = bcm_bits; b < 4; b++) {
-            bcm_plane_data[r][b][0] = 0x00000;
-            bcm_plane_data[r][b][1] = 0;
+    }
+    zero_planes_from(bcm_bits);
+    return bcm_bits;
+}
+
+
+int precompute_bank_data(Pattern &pat, float base_on_us, const uint16_t window_ns[4]) {
+    uint8_t duty_cycle = pat.duty_cycle();
+    int bcm_bits = gray_bits(pat);
+    const uint32_t *bcm_weights = (bcm_bits == 1) ? GRAY2_WEIGHTS : GRAY16_WEIGHTS;
+    int nplanes = Bank::kNumBanks * bcm_bits;
+
+    // Strict-off, as in precompute_bcm_data(): every plane dark at duty 0.
+    if (duty_cycle == 0) {
+        zero_planes_from(0);
+        return nplanes;
+    }
+
+    // Per-(bank, bit-plane) PIO delays. The window table is specified at the
+    // 3.0 µs base; Triggered's 1.0 µs base (or a selftest retune) scales it so
+    // the row keeps the same length relative to the legacy row.
+    float base_scale = base_on_us / BCM_BASE_ON_US;
+    uint32_t pio_delays[Bank::kNumBanks][4] = {};
+    for (int k = 0; k < Bank::kNumBanks; k++) {
+        uint32_t win = Bank::window_cycles(window_ns[k], cycles_per_us, base_scale);
+        for (int b = 0; b < bcm_bits; b++) {
+            pio_delays[k][b] = Bank::pio_delay(
+                Bank::plane_on_cycles(win, bcm_weights[b], GRAY_WEIGHT_SUM, duty_cycle));
         }
     }
 
-    // For each layout pixel, OR its bit-plane contributions into the
-    // corresponding schematic-row column pattern.
-    for (int lr = 0; lr < PANEL_SIZE; lr++) {
-        for (int lc = 0; lc < PANEL_SIZE; lc++) {
-            uint8_t sch_row = layout_to_sch_row[lr][lc];
-            uint8_t sch_col = layout_to_sch_col[lr][lc];
-            uint8_t intensity = pat.matrix()(lr, lc)
-                              & ((bcm_bits == 1) ? 0x01 : 0x0F);
-
-            // Gray_2: intensity ∈ {0,1}; set the single plane iff intensity != 0
-            // Gray_16: intensity ∈ [0,15]; set each plane b iff (intensity >> b) & 1
+    // Each window lights only its bank's columns. A zero-length window keeps
+    // its bank dark (no 5-cycle floor pulse); its planes still run, with
+    // col_word 0, so the row's plane layout never changes.
+    //
+    // Room for later (not built): a per-row compensation for the row-driver
+    // droop would scale pio_delays[k][b] by a gain indexed by the number of
+    // LEDs lit in (row, bank) — popcount(words[r][b] & mask), 0..5 — here;
+    // twopio_precompute() already sums each row's own delays.
+    uint32_t words[PANEL_SIZE][4];
+    build_plane_words(pat, bcm_bits, words);
+    for (int r = 0; r < PANEL_SIZE; r++) {
+        for (int k = 0; k < Bank::kNumBanks; k++) {
+            uint32_t mask = (window_ns[k] != 0) ? Bank::kBankMask[k] : 0u;
             for (int b = 0; b < bcm_bits; b++) {
-                bool set_this_plane = (bcm_bits == 1)
-                                    ? (intensity != 0)
-                                    : ((intensity >> b) & 1);
-                if (set_this_plane) {
-                    bcm_plane_data[sch_row][b][0] |= (1UL << sch_col);
-                }
+                int p = Bank::plane_index(k, b, bcm_bits);
+                bcm_plane_data[r][p][0] = words[r][b] & mask;
+                bcm_plane_data[r][p][1] = pio_delays[k][b];
             }
         }
     }
+    zero_planes_from(nplanes);
+    return nplanes;
 }

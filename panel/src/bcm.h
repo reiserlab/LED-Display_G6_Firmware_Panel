@@ -46,11 +46,18 @@ constexpr uint32_t PIO_ON_OVERHEAD_CYCLES = 5;
 // clock_get_hz(clk_sys) / 1000000UL (typically 150 on RP2350).
 extern uint32_t cycles_per_us;
 
-// BCM precompute output. [schematic_row][bit_plane][{pio_col_word, pio_delay}].
+// Most planes a row can have: 4 banks x 4 Gray_16 bit-planes in the
+// bank-window scan (LAB-286). Legacy scan uses 1 (Gray_2) or 4 (Gray_16).
+constexpr int BCM_MAX_PLANES = 16;
+
+// BCM precompute output. [schematic_row][plane][{pio_col_word, pio_delay}].
 // pio_col_word: 20-bit mask, 1 = col HIGH = ON under normal polarity.
 // pio_delay:    PIO delay count for jmp x--, 6 loop (cycles minus 5 overhead).
-// Sized for max 4 planes (Gray_16); Gray_2 uses index 0 only.
-extern uint32_t bcm_plane_data[PANEL_SIZE][4][2];
+// Planes per row: legacy 1 (Gray_2) / 4 (Gray_16); bank windows 4 / 16
+// (bank-major: T0's planes, then T1's, T2's, T3's). Planes past the row's
+// count are zeroed. Each row's planes are one contiguous run of
+// {col_word, delay} pairs, DMA'd straight to the column SM.
+extern uint32_t bcm_plane_data[PANEL_SIZE][BCM_MAX_PLANES][2];
 
 // Per-row GPIO 64-bit mask: bit set at ROW_PIN[r]. Used by Display::show() to
 // gpio_clr_mask64() / gpio_set_mask64() for row-LOW (ON) / row-HIGH (OFF).
@@ -68,12 +75,20 @@ void precompute_scan_masks();
 // Performance: ~400 inner iterations × 1-4 plane updates each. At ~50 Hz
 // pattern-change cadence this is trivially cheap; safe to call from
 // Display::update() on each new pattern dequeue.
-void precompute_bcm_data(Pattern &pat);
+int precompute_bcm_data(Pattern &pat);
 
-// Same, with an explicit base ON time (µs). Display::rebuild_scan_data() reads
-// the base once and passes it here so the base it records always matches the
-// data built (the selftest retunes bcm_base_on_us from the other core).
-void precompute_bcm_data(Pattern &pat, float base_on_us);
+// Same, with an explicit base ON time (µs). The selftest retunes
+// bcm_base_on_us from the other core, so callers that record the base read it
+// once and pass it here. Returns the planes per row written (1 or 4).
+int precompute_bcm_data(Pattern &pat, float base_on_us);
+
+// LAB-286 bank-window scan: build bcm_plane_data[] for `pat` with one window
+// per LED bank (bank_logic.h). Each Gray_2 row gets 4 planes (T0..T3, each
+// lit for its whole window x duty/255); each Gray_16 row gets 16 (weights
+// 1, 2, 4, 8 inside every window). window_ns[] is the table at duty 255 and
+// the 3.0 µs base; another base scales it by base_on_us / BCM_BASE_ON_US.
+// A window of 0 keeps that bank dark. Returns the planes per row (4 or 16).
+int precompute_bank_data(Pattern &pat, float base_on_us, const uint16_t window_ns[4]);
 
 // The BCM base ON time (µs) precompute_bcm_data() uses for `pat`: the
 // Triggered base for Triggered patterns, bcm_base_on_us otherwise.

@@ -3,6 +3,7 @@
 #include "bcm.h"
 #include "display_scan_twopio.h"
 #include "predef_patterns.h"
+#include "scan_config.h"
 #include "protocol.h"
 #include <hardware/pio.h>
 #include <hardware/gpio.h>
@@ -63,9 +64,12 @@ static volatile uint32_t s_scan_us_max       = 0;
 #if STAGE2_SELFTEST
 // Bench: per-row "free work" injection (µs) — see display.h / the 'k' command.
 volatile uint32_t g_bench_inject_us = 0;
+#endif
 
+#if STAGE2_SELFTEST || PANEL_CONSOLE
 // Cycle-precise (DWT CYCCNT, ~6.67 ns @ 150 MHz) per-frame scan-time stats for
-// the 'j' jitter command — finer than the 1 µs time_us_32 stats. DWT is
+// the 'j' jitter command and the bankwin 'S' command — finer than the 1 µs
+// time_us_32 stats. DWT is
 // core-local on the M33, so it is enabled lazily here on core 1 (where show()
 // runs). Ported from G6_Panels_Test_Firmware dwt_init().
 #include <hardware/structs/m33.h>
@@ -98,7 +102,7 @@ void display_reset_scan_stats() {
     s_period_us_max    = 0;
     s_scan_us_min      = UINT32_MAX;
     s_scan_us_max      = 0;
-#if STAGE2_SELFTEST
+#if STAGE2_SELFTEST || PANEL_CONSOLE
     s_scan_cyc_min     = UINT32_MAX;
     s_scan_cyc_max     = 0;
     s_scan_cyc_total   = 0;
@@ -168,6 +172,13 @@ void Display::initialize() {
 
 
 void Display::update() {
+    // LAB-286: a scan-mode / window-table change from core 0 takes effect
+    // before the next frame. Rebuild whatever is showing now (pattern or
+    // error glyph); later rebuilds pick up scan_cfg_ on their own.
+    if (scan_config_poll(scan_cfg_) && have_pattern_) {
+        rebuild_scan_data();
+    }
+
     // Error-display window: highest priority. Drain (and discard) any
     // patterns queued by core 0 while the window is active so they don't
     // pile up to be replayed when the window ends. The display keeps
@@ -332,8 +343,10 @@ void Display::enter_error_display(uint32_t slot) {
 
 void Display::rebuild_scan_data() {
     float base_on_us = bcm_base_on_us_for(pat_);   // read once (see bcm.h)
-    precompute_bcm_data(pat_, base_on_us);
-    twopio_precompute((pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
+    scan_planes_ = (scan_cfg_.mode == ScanMode::BankWindows)
+                 ? precompute_bank_data(pat_, base_on_us, scan_cfg_.window_ns)
+                 : precompute_bcm_data(pat_, base_on_us);
+    twopio_precompute(scan_planes_);
     precomputed_base_us_ = base_on_us;
 }
 
@@ -390,6 +403,9 @@ bool Display::show_row(int r) {
     //
     //   N = 1 for Gray_2 (single weight-15 plane)
     //   N = 4 for Gray_16 (weights {1, 2, 4, 8})
+    //   LAB-286 bank windows: N = 4 / 16 (one window per LED bank, the
+    //   Gray_16 bit-planes inside each window). The row length is the sum
+    //   of the window table (44.9 µs at Option B, duty 255) instead of 45 µs.
     //
     // Strict-off (duty_cycle == 0): bcm_plane_data column words are all
     // zero (precompute_bcm_data guard); the row still scans but drives no
@@ -422,11 +438,10 @@ bool Display::show_row(int r) {
     //   "within one bit-plane interval" — per-row is a documented
     //   departure (see plan).
     // ----------------------------------------------------------------------
-    uint8_t bcm_bits = (pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4;
     // v0.3.1: both axes are PIO/DMA-driven — one autonomous burst scans this
-    // row through all bit-planes. Reached by Triggered (one call per EINT
+    // row through all planes. Reached by Triggered (one call per EINT
     // trigger edge) and Gated (one call per row, level checked between rows).
-    return twopio_scan_row(r, bcm_bits);
+    return twopio_scan_row(r, scan_planes_);
 }
 
 
@@ -443,14 +458,13 @@ void Display::show() {
     // ~260x to a useless ~4x.
 
     uint32_t t_start = time_us_32();
-#if STAGE2_SELFTEST
+#if STAGE2_SELFTEST || PANEL_CONSOLE
     dwt_ensure();
     uint32_t c_start = m33_hw->dwt_cyccnt;   // cycle-precise scan-time start
 #endif
 
     // One DMA-fed two-PIO burst per row; core 1 only arms + polls.
-    int bcm_bits = (pat_.gray_level() == GrayLevel::Gray_2) ? 1 : 4;
-    if (!twopio_scan_frame(bcm_bits)) {
+    if (!twopio_scan_frame(scan_planes_)) {
         // Faulted frame: twopio already aborted DMA + re-primed the SMs. Skip
         // this frame's period pad + scan-stats accounting (a timeout would skew
         // the timing stats) and let loop1() re-enter. twopio_get_timeouts()
@@ -460,7 +474,7 @@ void Display::show() {
 
     uint32_t t_scan_end = time_us_32();
     uint32_t scan_us    = t_scan_end - t_start;
-#if STAGE2_SELFTEST
+#if STAGE2_SELFTEST || PANEL_CONSOLE
     uint32_t scan_cyc   = m33_hw->dwt_cyccnt - c_start;   // scan-only cycles
 #endif
 
@@ -485,7 +499,7 @@ void Display::show() {
     if (period_us > s_period_us_max) s_period_us_max = period_us;
     if (scan_us   < s_scan_us_min)   s_scan_us_min   = scan_us;
     if (scan_us   > s_scan_us_max)   s_scan_us_max   = scan_us;
-#if STAGE2_SELFTEST
+#if STAGE2_SELFTEST || PANEL_CONSOLE
     s_scan_cyc_count++;
     s_scan_cyc_total += scan_cyc;
     if (scan_cyc < s_scan_cyc_min) s_scan_cyc_min = scan_cyc;
