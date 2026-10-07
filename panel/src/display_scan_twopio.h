@@ -28,21 +28,22 @@
 bool twopio_init();
 
 // Recompute the per-row {pattern, delay} array from the current bcm_plane_data[]
-// for `bcm_bits` planes (1 = Gray_2, 4 = Gray_16). Each row's PIO hold delay is
-// the sum of that row's column bit-plane durations + per-plane overhead + a
-// safety margin, so the row SM holds the row active for exactly the column
-// burst. Call after precompute_bcm_data() whenever the pattern changes.
-void twopio_precompute(int bcm_bits);
+// for `nplanes` planes per row (legacy: 1 = Gray_2, 4 = Gray_16; LAB-286 bank
+// windows: 4 / 16). Each row's PIO hold delay is the sum of that row's column
+// plane durations + per-plane overhead + a safety margin, so the row SM holds
+// the row active for exactly the column burst. Call after
+// precompute_bcm_data() / precompute_bank_data() whenever the pattern changes.
+void twopio_precompute(int nplanes);
 
-// Scan a single row r through all bcm_bits planes as one autonomous DMA burst,
+// Scan a single row r through all nplanes planes as one autonomous DMA burst,
 // then block until it completes (col DMA drained + col SM stalled + row SM back
 // at all-rows-OFF). Returns false on completion-poll timeout (fail-dark applied
 // before returning). Used by Display::show_row() — covers Triggered and Gated.
-bool twopio_scan_row(int r, int bcm_bits);
+bool twopio_scan_row(int r, int nplanes);
 
 // Scan a full 20-row frame (loops twopio_scan_row over all rows). Returns false
 // if any row burst timed out. Used by Display::show() for Persistent/Oneshot.
-bool twopio_scan_frame(int bcm_bits);
+bool twopio_scan_frame(int nplanes);
 
 // Drive all pins dark via SIO (cols LOW, rows HIGH = OFF) and disable both SMs.
 // Used on fatal init failure (the per-row timeout path self-heals instead).

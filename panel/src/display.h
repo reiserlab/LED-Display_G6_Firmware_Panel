@@ -3,6 +3,7 @@
 #include <pico.h>
 #include "pico/util/queue.h"
 #include "pattern.h"
+#include "scan_config.h"
 
 class Display {
 
@@ -71,8 +72,16 @@ class Display {
         // Rebuild bcm_plane_data + the two-PIO row tables for pat_ and record
         // the BCM base they were built with (precomputed_base_us_), so
         // update() can skip the rebuild for a byte-identical re-streamed frame.
+        // Builds legacy or bank-window planes per scan_cfg_ (LAB-286) and sets
+        // scan_planes_, the planes per row the scanner runs.
         void rebuild_scan_data();
         float precomputed_base_us_ = -1.0f;
+        int   scan_planes_ = 1;
+
+        // LAB-286: core 1's copy of the scan configuration (legacy scan vs
+        // bank windows). Updated from scan_config_poll() at the top of
+        // update(); boots as legacy.
+        ScanConfig scan_cfg_;
 
         // Begin / end the error-display window (called only from core 1).
         void enter_error_display(uint32_t slot);
@@ -111,10 +120,13 @@ void display_get_scan_stats(ScanStats &out);
 // headroom test. The busy-wait overlaps the autonomous two-PIO DMA burst
 // (hidden from scan time until it exceeds the per-row burst). 0 = disabled.
 extern volatile uint32_t g_bench_inject_us;
+#endif
 
+#if STAGE2_SELFTEST || PANEL_CONSOLE
 // Cycle-precise (DWT CYCCNT) per-frame scan-time stats for the 'j' jitter
-// command: min/max/avg in core cycles over the frames since the last
-// display_reset_scan_stats(). Jitter = max - min.
+// command (bcmtest) and the 'S' console command (pico_v031_bankwin): min/max/
+// avg in core cycles over the frames since the last display_reset_scan_stats().
+// Jitter = max - min.
 void display_get_scan_cycle_stats(uint32_t &cmin, uint32_t &cmax,
                                   uint32_t &cavg, uint32_t &ccount);
 #endif

@@ -6,6 +6,14 @@
 #include "constants.h"
 #include "panel_spi_custom.h"
 
+// Bounded bus waits. Production waits on CS (and the TX/RX FIFOs) without a
+// timeout: core 0 has nothing else to do. Builds with a USB console on the
+// production path — SPI_DIAG (heartbeat + d/z) and PANEL_CONSOLE (the LAB-286
+// bank-window bench console) — bound every wait at a few ms so a quiet bus
+// returns a 0-byte read and the console runs. During streaming CS toggles
+// constantly and none of the bounds trip.
+#define SPI_IDLE_TIMEOUTS (SPI_DIAG || PANEL_CONSOLE)
+
 // ----------------------------------------------------------------------------
 // SPI peripheral: DMA-paced RX, direct-FIFO TX.
 //
@@ -60,7 +68,7 @@ static void ensure_dma_init() {
 // ----------------------------------------------------------------------------
 static void spi_drain_rx() {
     spi_hw_t *hw = spi_get_hw(SPI_INST);
-#if SPI_DIAG
+#if SPI_IDLE_TIMEOUTS
     // Diag builds: bound the drain so a bus that continuously clocks RX can't
     // wedge core 0 before the telemetry heartbeat runs.
     uint32_t t0 = time_us_32();
@@ -88,7 +96,7 @@ static void spi_drain_rx() {
 // ----------------------------------------------------------------------------
 static void prime_tx_confirmation() {
     spi_hw_t *hw = spi_get_hw(SPI_INST);
-#if SPI_DIAG
+#if SPI_IDLE_TIMEOUTS
     // Diag builds: bound the FIFO-writable waits. On a quiet bus (CS idle high,
     // no SCK) the TX FIFO never drains, so successive primes would fill it and
     // this would spin forever — wedging core 0 before the heartbeat. Abort the
@@ -224,7 +232,7 @@ void panel_spi_read(Message &msg) {
     // Start from an idle bus so we never arm mid-burst (a partial-tail capture
     // would be a false short count). If we entered late with CS already low,
     // wait that burst out first.
-#if SPI_DIAG
+#if SPI_IDLE_TIMEOUTS
     // Diag builds: bound this wait too, so a bus that idles/floats LOW (e.g. no
     // master, or between-frame level) can't wedge core 0 before the heartbeat.
     {
@@ -242,7 +250,7 @@ void panel_spi_read(Message &msg) {
     prime_tx_confirmation();     // load the 3-byte CIPO reply into the TX FIFO
     arm_rx_dma(msg.data_.data());
 
-#if SPI_DIAG
+#if SPI_IDLE_TIMEOUTS
     // Diag builds: don't spin forever when the master is idle/absent. Return
     // 0 bytes after a short CS-idle timeout so the messenger idle branch can
     // run the telemetry heartbeat + d/z commands (and so the instrument works
@@ -262,7 +270,7 @@ void panel_spi_read(Message &msg) {
 #else
     while (gpio_get(SPI_CS_PIN))  { tight_loop_contents(); }   // CS falling: start
 #endif
-#if SPI_DIAG
+#if SPI_IDLE_TIMEOUTS
     // Diag builds: bound the CS-rising (end-of-burst) wait too. A real frame
     // transaction is ~tens of µs, so 5 ms never trips during normal streaming;
     // it only rescues a bus that fell and is held LOW (idle default, or a

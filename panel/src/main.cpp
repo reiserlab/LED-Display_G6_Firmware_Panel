@@ -11,6 +11,8 @@
 #include "display_scan_twopio.h"
 #include "predef_patterns.h"
 #include "psram_store.h"
+#include "scan_config.h"
+#include "scan_console.h"
 
 queue_t display_queue;
 queue_t error_request_queue;   // uint32_t slot indices, core 0 -> core 1
@@ -65,6 +67,8 @@ static void selftest_banner() {
     Serial.println("            T=push Triggered all-on Gray_2 (drive GP45 with edges),");
     Serial.println("            g=push Gated checkerboard (drive GP45 level),");
     Serial.println("            x=toggle autocycle pause, t=timing benchmark, i=banner, ?=help");
+    Serial.println("  Bank windows (LAB-286): B=status, B0/B1=legacy/bank scan,");
+    Serial.println("            W<t0>,<t1>,<t2>,<t3>=window table in ns (e.g. W4200,5500,12700,22500)");
     Serial.println("======================================================");
 }
 
@@ -83,6 +87,9 @@ static void selftest_help() {
     Serial.println("  t            scan-period timing benchmark across duty_cycle values");
     Serial.println("  x            toggle the 60s autocycle on/off — pause for clean T/g/p observation");
     Serial.println("  i            re-print the boot banner");
+    Serial.println("  B / B0 / B1  scan mode status / legacy scan / bank windows (LAB-286)");
+    Serial.println("  W<t0>,<t1>,<t2>,<t3>  bank-window table in ns at duty 255 (T0 violet..T3 yellow),");
+    Serial.println("               e.g. W4200,5500,12700,22500 (each 0..45000, sum <= 48000); W alone prints it");
     Serial.println("  ?            this help");
 }
 
@@ -279,6 +286,9 @@ static void selftest_handle_serial() {
         selftest_help();
         return;
     }
+    // LAB-286 bank-window scan mode + window table (scan_console.h). Applies
+    // to whatever is showing, including the t/j/k benchmark patterns.
+    if (scan_console_command(line)) return;
     if (c == 'i') {
         // Re-print boot banner on demand. Useful because the original boot-time
         // banner often gets dropped before the host has opened the read endpoint
@@ -676,6 +686,7 @@ void setup() {
     Serial.begin(BAUDRATE);
     queue_init(&display_queue, sizeof(Pattern), DISPLAY_QUEUE_SIZE);
     queue_init(&error_request_queue, sizeof(uint32_t), ERROR_REQUEST_QUEUE_SIZE);
+    scan_config_init();   // LAB-286: legacy scan until a console/arena request
     // Validate the INCBIN'd predefined-pattern blob. Logs to serial on
     // failure but never blocks boot — the error-display path falls back to
     // the compiled-in glyph in that case.
@@ -709,6 +720,9 @@ void setup() {
 #else
     messenger.initialize();
     Serial.println("[boot] G6 panel core0 ready (ISP firmware)");
+#if PANEL_CONSOLE
+    Serial.println("[boot] bench console (pico_v031_bankwin): type ? for help");
+#endif
 #endif
 #endif
 }
@@ -767,6 +781,12 @@ void loop() {
     Isp::boot_indicator_check();
     while(true){
     messenger.update();
+#if PANEL_CONSOLE
+    // Bench console (pico_v031_bankwin). messenger.update() returns at least
+    // every 5 ms while the SPI bus idles (panel_spi_read's idle timeout in
+    // this build), so the console answers between arena runs.
+    panel_console_poll();
+#endif
     // Service USB CDC (TinyUSB) so Serial output actually flushes. Without this
     // the tight loop never returns to the core's USB task and all Serial.print
     // output is buffered forever (no boot banner, no diagnostics over USB).
@@ -826,8 +846,7 @@ void setup1() {
     // returning early before any host pattern arrives).
     Pattern boot_pat;
     boot_pat.set_mode(DisplayMode::Persistent);
-    precompute_bcm_data(boot_pat);
-    twopio_precompute((boot_pat.gray_level() == GrayLevel::Gray_2) ? 1 : 4);
+    twopio_precompute(precompute_bcm_data(boot_pat));
 }
 
 void loop1() {
